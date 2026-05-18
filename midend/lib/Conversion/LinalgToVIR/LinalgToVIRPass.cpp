@@ -366,6 +366,27 @@ static LogicalResult lowerReduceToScalarLoop(linalg::ReduceOp reduceOp,
 
   ArrayRef<int64_t> dims = reduceOp.getDimensions();
 
+  // Early-exit for unsupported rank/dimension combinations BEFORE creating
+  // any IR. This prevents the greedy driver from seeing IR modifications on
+  // a failed match, which would cause non-convergence.
+  int64_t inRank = inTy.getRank();
+  int64_t outRank = outTy.getRank();
+  bool supported = false;
+  if (inRank == 1 && outRank == 0 && dims.size() == 1 && dims[0] == 0)
+    supported = true;
+  else if (inRank == 2 && outRank == 1 && dims.size() == 1 &&
+           (dims[0] == 0 || dims[0] == 1))
+    supported = true;
+  else if (inRank == 3 && outRank == 2 && dims.size() == 1 && dims[0] == 0)
+    supported = true;
+
+  if (!supported) {
+    return rewriter.notifyMatchFailure(
+        reduceOp,
+        "unsupported rank/dimension combination for -lower-linalg-to-vir; "
+        "leaving for downstream lowering");
+  }
+
   Location loc = reduceOp.getLoc();
   rewriter.setInsertionPoint(reduceOp);
   Value lower = arith::ConstantIndexOp::create(rewriter, loc, 0);
@@ -2364,12 +2385,12 @@ struct LinalgReduceToVIRPattern : public RewritePattern {
       return rewriter.notifyMatchFailure(op, "expected linalg.reduce");
     if (succeeded(lowerReduceToScalarLoop(reduceOp, rewriter)))
       return success();
-    reduceOp.emitError(
-        "unsupported linalg.reduce for -lower-linalg-to-vir; supported forms "
-        "are rank-1->rank-0 dimensions=[0], rank-2->rank-1 dimensions=[1], "
-        "static-shape rank-2->rank-1 dimensions=[0], and static-shape "
-        "rank-3->rank-2 dimensions=[0], all with f32 addf/maxnumf combiner");
-    return failure();
+    // Unsupported reduces are left in place for downstream passes
+    // (e.g. --convert-linalg-to-affine-loops) to handle as scalar loops.
+    return rewriter.notifyMatchFailure(
+        reduceOp,
+        "unsupported linalg.reduce for -lower-linalg-to-vir; leaving for "
+        "downstream lowering");
   }
 };
 
