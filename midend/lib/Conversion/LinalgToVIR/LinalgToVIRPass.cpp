@@ -2218,6 +2218,16 @@ struct LinalgTransposeToVectorPattern : public RewritePattern {
       return success();
     }
 
+    // Skip vectorization for large tensors to avoid code explosion when
+    // vector.transpose is later lowered element-by-element.
+    int64_t numElements = 1;
+    for (int64_t dim : inputType.getShape())
+      numElements *= dim;
+    if (numElements > 1024) {
+      return rewriter.notifyMatchFailure(
+          op, "tensor too large for whole-tensor vectorization");
+    }
+
     Location loc = transposeOp.getLoc();
     Value zeroIndex = arith::ConstantIndexOp::create(rewriter, loc, 0);
     SmallVector<Value> indices(inputType.getRank(), zeroIndex);
