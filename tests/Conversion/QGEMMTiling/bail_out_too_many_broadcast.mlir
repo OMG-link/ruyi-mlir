@@ -1,0 +1,89 @@
+// RUN: buddy-opt --qgemm-tiling="tile-m=4 tile-n=4" %s 2>&1 | FileCheck %s
+
+// Verify that the DimensionClassifier bails out with a remark when more than
+// 2 broadcast dimensions are detected. The IR should pass through unchanged.
+
+// CHECK: remark:{{.*}}found 3 broadcast dimensions; expected exactly 2 (M and N)
+// CHECK: linalg.reduce
+// CHECK: bufferization.materialize_in_destination
+
+#map_identity5 = affine_map<(d0, d1, d2, d3, d4) -> (d0, d1, d2, d3, d4)>
+#map_bcast_d0  = affine_map<(d0, d1, d2, d3, d4) -> (0, d1, d2, d3, d4)>
+#map_bcast_d1  = affine_map<(d0, d1, d2, d3, d4) -> (d0, 0, d2, d3, d4)>
+#map_bcast_d2  = affine_map<(d0, d1, d2, d3, d4) -> (d0, d1, 0, d3, d4)>
+#map_identity4 = affine_map<(d0, d1, d2, d3, d4) -> (d0, d1, d2, d3)>
+
+func.func @three_broadcast_dims(%arg0: tensor<1x4x4x4x4xf32>,
+                                 %arg1: tensor<4x1x4x4x4xf32>,
+                                 %arg2: tensor<4x4x1x4x4xf32>,
+                                 %out: memref<4x4x4x4xf32>) {
+  // Broadcast %arg0 on dim 0
+  %empty0 = tensor.empty() : tensor<4x4x4x4x4xf32>
+  %bcast_a = linalg.generic {
+    indexing_maps = [#map_bcast_d0, #map_identity5],
+    iterator_types = ["parallel", "parallel", "parallel", "parallel", "parallel"]
+  } ins(%arg0 : tensor<1x4x4x4x4xf32>) outs(%empty0 : tensor<4x4x4x4x4xf32>) {
+  ^bb0(%in: f32, %out_elem: f32):
+    linalg.yield %in : f32
+  } -> tensor<4x4x4x4x4xf32>
+
+  // Broadcast %arg1 on dim 1
+  %empty1 = tensor.empty() : tensor<4x4x4x4x4xf32>
+  %bcast_b = linalg.generic {
+    indexing_maps = [#map_bcast_d1, #map_identity5],
+    iterator_types = ["parallel", "parallel", "parallel", "parallel", "parallel"]
+  } ins(%arg1 : tensor<4x1x4x4x4xf32>) outs(%empty1 : tensor<4x4x4x4x4xf32>) {
+  ^bb0(%in: f32, %out_elem: f32):
+    linalg.yield %in : f32
+  } -> tensor<4x4x4x4x4xf32>
+
+  // Broadcast %arg2 on dim 2
+  %empty2 = tensor.empty() : tensor<4x4x4x4x4xf32>
+  %bcast_c = linalg.generic {
+    indexing_maps = [#map_bcast_d2, #map_identity5],
+    iterator_types = ["parallel", "parallel", "parallel", "parallel", "parallel"]
+  } ins(%arg2 : tensor<4x4x1x4x4xf32>) outs(%empty2 : tensor<4x4x4x4x4xf32>) {
+  ^bb0(%in: f32, %out_elem: f32):
+    linalg.yield %in : f32
+  } -> tensor<4x4x4x4x4xf32>
+
+  // Element-wise multiply of all three broadcasts
+  %empty3 = tensor.empty() : tensor<4x4x4x4x4xf32>
+  %mul1 = linalg.generic {
+    indexing_maps = [#map_identity5, #map_identity5, #map_identity5],
+    iterator_types = ["parallel", "parallel", "parallel", "parallel", "parallel"]
+  } ins(%bcast_a, %bcast_b : tensor<4x4x4x4x4xf32>, tensor<4x4x4x4x4xf32>)
+    outs(%empty3 : tensor<4x4x4x4x4xf32>) {
+  ^bb0(%in0: f32, %in1: f32, %out_elem: f32):
+    %prod = arith.mulf %in0, %in1 : f32
+    linalg.yield %prod : f32
+  } -> tensor<4x4x4x4x4xf32>
+
+  %empty4 = tensor.empty() : tensor<4x4x4x4x4xf32>
+  %mul2 = linalg.generic {
+    indexing_maps = [#map_identity5, #map_identity5, #map_identity5],
+    iterator_types = ["parallel", "parallel", "parallel", "parallel", "parallel"]
+  } ins(%mul1, %bcast_c : tensor<4x4x4x4x4xf32>, tensor<4x4x4x4x4xf32>)
+    outs(%empty4 : tensor<4x4x4x4x4xf32>) {
+  ^bb0(%in0: f32, %in1: f32, %out_elem: f32):
+    %prod = arith.mulf %in0, %in1 : f32
+    linalg.yield %prod : f32
+  } -> tensor<4x4x4x4x4xf32>
+
+  // Reduce on dim 4 (reduction dimension)
+  %cst = arith.constant 0.0 : f32
+  %empty5 = tensor.empty() : tensor<4x4x4x4xf32>
+  %init = linalg.fill ins(%cst : f32) outs(%empty5 : tensor<4x4x4x4xf32>) -> tensor<4x4x4x4xf32>
+  %reduced = linalg.reduce ins(%mul2 : tensor<4x4x4x4x4xf32>)
+                           outs(%init : tensor<4x4x4x4xf32>)
+                           dimensions = [4]
+    (%in: f32, %acc: f32) {
+      %sum = arith.addf %in, %acc : f32
+      linalg.yield %sum : f32
+    }
+
+  // Store result
+  bufferization.materialize_in_destination %reduced in writable %out
+    : (tensor<4x4x4x4xf32>, memref<4x4x4x4xf32>) -> ()
+  return
+}
