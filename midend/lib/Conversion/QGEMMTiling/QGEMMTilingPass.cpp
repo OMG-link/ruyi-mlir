@@ -21,7 +21,8 @@
 
 #include "ContractionSubgraph.h"
 #include "DimensionClassifier.h"
-#include "FinalConsumerFinder.h"
+#include "ReduceChainAnalysis.h"
+#include "RootFilter.h"
 #include "TileSizeComputer.h"
 #include "TilingExecutor.h"
 
@@ -30,13 +31,29 @@
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/IR/Dominance.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/Transforms/CSE.h"
+#include "mlir/Transforms/RegionUtils.h"
 
 #define DEBUG_TYPE "qgemm-tiling"
 
 using namespace mlir;
 
 namespace {
+
+/// Find all tiling roots in the function.
+/// Currently delegates to reduce-chain analysis. Future versions may
+/// combine multiple strategies here.
+static SmallVector<linalg::LinalgOp> findTilingRoots(func::FuncOp funcOp) {
+  SmallVector<linalg::ReduceOp> reduceRoots =
+      buddy::findReduceChainRoots(funcOp);
+  SmallVector<linalg::LinalgOp> roots;
+  roots.reserve(reduceRoots.size());
+  for (linalg::ReduceOp r : reduceRoots)
+    roots.push_back(cast<linalg::LinalgOp>(r.getOperation()));
+  return roots;
+}
 
 struct QGEMMTilingPass
     : public PassWrapper<QGEMMTilingPass, OperationPass<func::FuncOp>> {
@@ -65,18 +82,18 @@ struct QGEMMTilingPass
   }
 
   void runOnOperation() override {
-    // Validate pass parameters.
+    func::FuncOp funcOp = getOperation();
+
+    // 1. Validate pass parameters.
     if (tileM < 0) {
-      getOperation()->emitError()
-          << "invalid tile-m value " << static_cast<int64_t>(tileM)
-          << " (must be >= 0)";
+      funcOp->emitError() << "invalid tile-m value "
+                          << static_cast<int64_t>(tileM) << " (must be >= 0)";
       signalPassFailure();
       return;
     }
     if (tileN < 0) {
-      getOperation()->emitError()
-          << "invalid tile-n value " << static_cast<int64_t>(tileN)
-          << " (must be >= 0)";
+      funcOp->emitError() << "invalid tile-n value "
+                          << static_cast<int64_t>(tileN) << " (must be >= 0)";
       signalPassFailure();
       return;
     }
@@ -85,34 +102,64 @@ struct QGEMMTilingPass
     if (tileM == 0 && tileN == 0)
       return;
 
-    // Step 1: Find the final consumer (tiling root).
-    auto consumerInfo = buddy::findFinalConsumer(getOperation());
-    if (!consumerInfo.has_value()) {
-      getOperation()->emitRemark(
-          "no materialize_in_destination found; skipping qgemm-tiling");
+    // 2. Find all tiling roots.
+    SmallVector<linalg::LinalgOp> roots = findTilingRoots(funcOp);
+    if (roots.empty())
+      return; // No eligible roots found — leave IR unchanged.
+
+    // 3. Collect subgraphs for each root (skip failed ones).
+    SmallVector<buddy::TilingCandidate> rawCandidates;
+    for (linalg::LinalgOp root : roots) {
+      auto subgraph = buddy::collectSubgraph(root);
+      if (failed(subgraph))
+        continue; // Subgraph collection failed — skip silently.
+      rawCandidates.push_back({root, std::move(*subgraph)});
+    }
+    if (rawCandidates.empty())
       return;
+
+    // 4. Filter out diamond-conflicting roots.
+    SmallVector<buddy::TilingCandidate> candidates =
+        buddy::filterTilingCandidates(rawCandidates);
+
+    // 5. Process each valid candidate sequentially.
+    bool anyTiled = false;
+    for (auto &candidate : candidates) {
+      // Classify dimensions.
+      auto classification = buddy::classifyDimensions(candidate.subgraph);
+      if (failed(classification))
+        continue; // Skip this root.
+
+      // Compute tile sizes.
+      auto tileSizes = buddy::computeTileSizes(candidate.tilingRoot,
+                                               *classification, tileM, tileN);
+      if (failed(tileSizes))
+        continue; // Skip this root (dynamic dims).
+
+      // Check if all tile sizes are 0 (no tiling needed).
+      bool allZero = llvm::all_of(*tileSizes, [](OpFoldResult ofr) {
+        auto attr = dyn_cast<Attribute>(ofr);
+        return attr && cast<IntegerAttr>(attr).getInt() == 0;
+      });
+      if (allZero)
+        continue; // Skip this root — extents ≤ tile sizes.
+
+      // Execute tiling.
+      buddy::executeTiling(candidate.tilingRoot, candidate.subgraph,
+                           *tileSizes);
+      anyTiled = true;
     }
 
-    // Step 2: Collect the contraction subgraph via backward BFS.
-    auto subgraph = buddy::collectSubgraph(consumerInfo->tilingRoot);
-    if (failed(subgraph))
-      return;
-
-    // Step 3: Classify dimensions as M, N, or Batch.
-    auto classificationResult = buddy::classifyDimensions(*subgraph);
-    if (failed(classificationResult))
-      return; // Bail out — diagnostics already emitted by classifyDimensions.
-    auto &classification = *classificationResult;
-
-    // Step 4: Compute tile sizes (includes dynamic shape check;
-    // returns failure if M/N dims are dynamic).
-    auto tileSizes = buddy::computeTileSizes(consumerInfo->tilingRoot,
-                                             classification, tileM, tileN);
-    if (failed(tileSizes))
-      return;
-
-    // Step 5: Execute tiling with producer fusion.
-    buddy::executeTiling(consumerInfo->tilingRoot, *subgraph, *tileSizes);
+    // 6. Run DCE and CSE if any tiling was performed.
+    if (anyTiled) {
+      IRRewriter rewriter(funcOp->getContext());
+      // Remove dead ops left behind by tiling (originals replaced by clones).
+      (void)runRegionDCE(rewriter, funcOp->getRegions());
+      // Merge duplicate constants and common subexpressions introduced by
+      // cloning producers into loop bodies.
+      DominanceInfo domInfo(funcOp);
+      eliminateCommonSubExpressions(rewriter, domInfo, funcOp);
+    }
   }
 };
 

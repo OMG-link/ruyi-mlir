@@ -4,6 +4,7 @@
 // 2 broadcast dimensions are detected. The IR should pass through unchanged.
 
 // CHECK: remark:{{.*}}found 3 broadcast dimensions; expected exactly 2 (M and N)
+// CHECK-LABEL: func.func @three_broadcast_dims
 // CHECK: linalg.reduce
 // CHECK: bufferization.materialize_in_destination
 

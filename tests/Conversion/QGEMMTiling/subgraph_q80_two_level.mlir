@@ -11,16 +11,18 @@
 //
 // Expected: hasBroadcast = [true, true], reduces = 2
 
-// CHECK: Found tiling root: {{.*}}linalg.reduce
-// CHECK: Reduce (continue): {{.*}}linalg.reduce
+// CHECK: Reduce chain root: {{.*}}linalg.reduce
+// CHECK: Generic (continue):
 // CHECK: Broadcast detected: iter dim 1 -> output dim 1
 // CHECK: Generic (continue):
 // CHECK: Broadcast detected: iter dim 0 -> output dim 0
 // CHECK: Generic (continue):
+// CHECK: Reduce (continue): {{.*}}linalg.reduce
 // CHECK: ContractionSubgraph collected:
-// CHECK-NEXT: ops: 20
+// CHECK-NEXT: ops: 11
 // CHECK-NEXT: reduces: 2
 // CHECK-NEXT: hasBroadcast: [true, true]
+// CHECK-LABEL: func.func @q80_two_level
 
 #map4 = affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>
 #map_bcast4_d1 = affine_map<(d0, d1, d2, d3) -> (d0, 0, d2, d3)>

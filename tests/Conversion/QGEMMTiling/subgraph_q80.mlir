@@ -9,16 +9,17 @@
 // 4. Element-wise generic is traversed
 // 5. Final subgraph summary is correct (ops count, reduces count, hasBroadcast)
 
-// CHECK: Found tiling root: {{.*}}linalg.reduce
+// CHECK: Reduce chain root: {{.*}}linalg.reduce
 // CHECK: Generic (continue): {{.*}}linalg.generic
 // CHECK: Broadcast detected: iter dim 1 -> output dim 1
 // CHECK: Generic (continue): {{.*}}linalg.generic
 // CHECK: Broadcast detected: iter dim 0 -> output dim 0
 // CHECK: Generic (continue): {{.*}}linalg.generic
 // CHECK: ContractionSubgraph collected:
-// CHECK-NEXT: ops: 9
+// CHECK-NEXT: ops: 5
 // CHECK-NEXT: reduces: 1
 // CHECK-NEXT: hasBroadcast: [true, true]
+// CHECK-LABEL: func.func @q80_subgraph
 
 #map_identity3 = affine_map<(d0, d1, d2) -> (d0, d1, d2)>
 #map_bcast_d1  = affine_map<(d0, d1, d2) -> (d0, 0, d2)>

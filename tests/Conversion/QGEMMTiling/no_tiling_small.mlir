@@ -72,6 +72,7 @@ func.func @q80_no_tiling_small(%arg0: tensor<16x1x2x32xf32>, %arg1: tensor<1x16x
 }
 
 // Verify no tiling loop is generated (all dims ≤ tile sizes → IR unchanged)
+// CHECK-LABEL: func.func @q80_no_tiling_small
 // CHECK-NOT: scf.for
 
 // Verify original reduces still present

@@ -74,6 +74,7 @@ func.func @custom_tile_sizes(%arg0: tensor<128x1x2x32xf32>, %arg1: tensor<1x64x2
   return
 }
 
+// CHECK-LABEL: func.func @custom_tile_sizes
 // CHECK-DAG: %[[C128:.*]] = arith.constant 128 : index
 // CHECK-DAG: %[[C16:.*]] = arith.constant 16 : index
 // CHECK-DAG: %[[C64:.*]] = arith.constant 64 : index

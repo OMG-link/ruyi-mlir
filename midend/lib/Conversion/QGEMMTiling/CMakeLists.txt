@@ -1,6 +1,7 @@
 add_mlir_library(QGEMMTilingPass
   QGEMMTilingPass.cpp
-  FinalConsumerFinder.cpp
+  ReduceChainAnalysis.cpp
+  RootFilter.cpp
   ContractionSubgraph.cpp
   DimensionClassifier.cpp
   TileSizeComputer.cpp

@@ -28,8 +28,6 @@
 
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/IR/OpDefinition.h"
-#include "mlir/IR/PatternMatch.h"
-#include "mlir/Support/LogicalResult.h"
 
 namespace mlir {
 namespace buddy {

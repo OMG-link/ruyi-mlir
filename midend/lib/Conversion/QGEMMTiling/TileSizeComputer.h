@@ -27,7 +27,6 @@
 #include "DimensionClassifier.h"
 
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
-#include "mlir/IR/Builders.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/Support/LogicalResult.h"
 

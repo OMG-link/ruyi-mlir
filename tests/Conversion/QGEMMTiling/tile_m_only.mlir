@@ -71,6 +71,7 @@ func.func @tile_m_only(%arg0: tensor<64x1x2x32xf32>, %arg1: tensor<1x16x2x32xf32
   return
 }
 
+// CHECK-LABEL: func.func @tile_m_only
 // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
 // CHECK-DAG: %[[C64:.*]] = arith.constant 64 : index
 // CHECK-DAG: %[[C32:.*]] = arith.constant 32 : index

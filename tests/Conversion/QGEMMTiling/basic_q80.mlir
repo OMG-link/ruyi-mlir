@@ -74,6 +74,7 @@ func.func @q80_basic_tiling(%arg0: tensor<64x1x2x32xf32>, %arg1: tensor<1x32x2x3
   return
 }
 
+// CHECK-LABEL: func.func @q80_basic_tiling
 // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
 // CHECK-DAG: %[[C64:.*]] = arith.constant 64 : index
 // CHECK-DAG: %[[C32:.*]] = arith.constant 32 : index

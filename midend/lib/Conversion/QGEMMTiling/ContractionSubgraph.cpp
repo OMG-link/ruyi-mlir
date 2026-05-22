@@ -24,17 +24,16 @@
 //   - Whether to add it to the subgraph's op set.
 //   - Whether to enqueue it for further traversal.
 //
-// Broadcast inputs (generic input operands whose indexing map contains a
-// constant expression) are skipped — their defining ops are not added to the
-// subgraph and not traversed.
+// Boundary conditions are defined by SubgraphBoundary.h:
+//   - isBoundaryEdge: block arguments, cross-block edges, broadcast edges
+//   - isBoundaryOp: tensor.extract_slice, tensor.empty, unrecognized ops
 //
 //===----------------------------------------------------------------------===//
 
 #include "ContractionSubgraph.h"
+#include "SubgraphBoundary.h"
 
-#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
-#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/AffineExpr.h"
 #include "mlir/IR/AffineMap.h"
 #include "llvm/Support/Debug.h"
@@ -48,33 +47,6 @@ using namespace mlir;
 
 namespace mlir {
 namespace buddy {
-
-//===----------------------------------------------------------------------===//
-// Operand classification helpers
-//===----------------------------------------------------------------------===//
-
-/// Return true if `operand` is an input of `genericOp` whose indexing map
-/// contains a constant expression (i.e., the input is broadcast along at
-/// least one iteration-space dimension).
-static bool isBroadcastInput(linalg::GenericOp genericOp, OpOperand *operand) {
-  AffineMap map = genericOp.getMatchingIndexingMap(operand);
-  for (AffineExpr expr : map.getResults()) {
-    if (isa<AffineConstantExpr>(expr))
-      return true;
-  }
-  return false;
-}
-
-/// Return true if `reduceOp` uses an additive combiner (arith.addi or
-/// arith.addf in its combiner region).
-static bool hasAdditiveCombiner(linalg::ReduceOp reduceOp) {
-  Block &body = reduceOp.getCombiner().front();
-  for (Operation &op : body.without_terminator()) {
-    if (isa<arith::AddIOp, arith::AddFOp>(op))
-      return true;
-  }
-  return false;
-}
 
 //===----------------------------------------------------------------------===//
 // DimMapping composition helpers
@@ -266,26 +238,26 @@ computeIterSpaceMapping(Operation *defOp, const DimMapping &outputMapping) {
 // collectSubgraph: backward BFS
 //===----------------------------------------------------------------------===//
 
-/// Collect all operands (ins + outs/inits) of a structured linalg op.
-static SmallVector<Value> getAllOperands(Operation *op) {
-  SmallVector<Value> operands;
+/// Collect pointers to all tensor OpOperands (ins + outs/inits) of a
+/// structured linalg op. Returns OpOperand* so that isBoundaryEdge can
+/// inspect the operand's indexing map in the consumer.
+static SmallVector<OpOperand *> getAllOpOperands(Operation *op) {
+  SmallVector<OpOperand *> operands;
   if (auto genericOp = dyn_cast<linalg::GenericOp>(op)) {
     for (OpOperand *input : genericOp.getDpsInputOperands())
-      operands.push_back(input->get());
-    for (Value init : genericOp.getDpsInits())
-      operands.push_back(init);
-  } else if (auto reduceOp = dyn_cast<linalg::ReduceOp>(op)) {
-    for (Value input : reduceOp.getInputs())
       operands.push_back(input);
-    for (Value init : reduceOp.getInits())
-      operands.push_back(init);
+    for (OpOperand &init : genericOp.getDpsInitsMutable())
+      operands.push_back(&init);
+  } else if (auto reduceOp = dyn_cast<linalg::ReduceOp>(op)) {
+    for (OpOperand &operand : reduceOp->getOpOperands())
+      operands.push_back(&operand);
   } else if (auto transposeOp = dyn_cast<linalg::TransposeOp>(op)) {
-    operands.push_back(transposeOp.getInput());
-    operands.push_back(transposeOp.getInit());
+    for (OpOperand &operand : transposeOp->getOpOperands())
+      operands.push_back(&operand);
   } else if (auto fillOp = dyn_cast<linalg::FillOp>(op)) {
     // Fill's inputs are scalars (not tensor producers). Only collect outputs.
-    for (Value out : fillOp.getOutputs())
-      operands.push_back(out);
+    for (OpOperand &init : fillOp.getDpsInitsMutable())
+      operands.push_back(&init);
   }
   return operands;
 }
@@ -326,54 +298,42 @@ FailureOr<ContractionSubgraph> collectSubgraph(linalg::LinalgOp tilingRoot) {
     worklist.pop_front();
 
     const DimMapping &knownMapping = subgraph.dimMappings[knownOp];
-    SmallVector<Value> operands = getAllOperands(knownOp);
+    SmallVector<OpOperand *> operands = getAllOpOperands(knownOp);
 
-    for (Value operand : operands) {
-      Operation *defOp = operand.getDefiningOp();
-      if (!defOp)
-        continue;
-
-      // Skip broadcast inputs: if this operand is an input of a generic
-      // whose indexing map has a constant expression, its defining op is
-      // not part of the contraction subgraph.
-      if (auto genericOp = dyn_cast<linalg::GenericOp>(knownOp)) {
-        bool skip = false;
-        for (OpOperand *inp : genericOp.getDpsInputOperands()) {
-          if (inp->get() == operand && isBroadcastInput(genericOp, inp)) {
-            LLVM_DEBUG(llvm::dbgs()
-                       << "  Broadcast input (skip): " << *defOp << "\n");
-            skip = true;
-            break;
-          }
-        }
-        if (skip)
-          continue;
-      }
-
-      // --- Leaf: tensor.empty has no iteration space, just collect it ---
-
-      if (isa<tensor::EmptyOp>(defOp)) {
-        if (!subgraph.ops.contains(defOp)) {
-          subgraph.ops.insert(defOp);
-          LLVM_DEBUG(llvm::dbgs()
-                     << "  tensor.empty (stop): " << *defOp << "\n");
-        }
+    for (OpOperand *opOperand : operands) {
+      // Unified boundary edge check: block arguments, cross-block edges,
+      // and broadcast edges (constant expression in indexing map).
+      if (isBoundaryEdge(knownOp, opOperand)) {
+        LLVM_DEBUG(llvm::dbgs()
+                   << "  Boundary edge (skip): " << opOperand->get() << "\n");
         continue;
       }
 
-      // --- Structured linalg ops: compute mapping, check diamond, add ---
+      Operation *defOp = opOperand->get().getDefiningOp();
+
+      // Unified boundary op check: tensor.extract_slice, tensor.empty,
+      // and unrecognized op types.
+      if (isBoundaryOp(defOp)) {
+        LLVM_DEBUG(llvm::dbgs() << "  Boundary op (skip): " << *defOp << "\n");
+        continue;
+      }
+
+      // --- From here: defOp is a recognized structured linalg op,
+      //     in the same block, reached through a non-boundary edge ---
 
       // Step 1: Compute defOp's output mapping from the edge.
       DimMapping outputMapping =
-          computeEdgeMapping(knownOp, operand, knownMapping);
+          computeEdgeMapping(knownOp, opOperand->get(), knownMapping);
 
       // Step 2: Compute defOp's iteration-space mapping.
       std::optional<DimMapping> iterMapping =
           computeIterSpaceMapping(defOp, outputMapping);
       if (!iterMapping.has_value()) {
-        LLVM_DEBUG(llvm::dbgs() << "  Unrecognized op (stop, not included): "
-                                << *defOp << "\n");
-        continue;
+        // This should not happen: isBoundaryOp already filters unrecognized
+        // ops. If we reach here, it means isBoundaryOp's whitelist and
+        // computeIterSpaceMapping's support are out of sync.
+        llvm_unreachable(
+            "isBoundaryOp returned false but computeIterSpaceMapping failed");
       }
 
       // Step 3: Diamond consistency check.

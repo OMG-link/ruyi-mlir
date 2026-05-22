@@ -74,5 +74,6 @@ func.func @dynamic_m(%arg0: tensor<?x1x2x32xf32>, %arg1: tensor<1x32x2x32xf32>,
 }
 
 // CHECK: remark{{.*}}dynamic M/N dimension in tiling root; skipping
+// CHECK-LABEL: func.func @dynamic_m
 // CHECK-NOT: scf.for
 // CHECK: linalg.reduce

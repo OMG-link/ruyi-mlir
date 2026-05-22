@@ -6,6 +6,7 @@
 // succeed with M=0, N=1.
 
 // CHECK: DimensionClassification: M=0 N=1
+// CHECK-LABEL: func.func @q80_classify
 
 #map_identity4 = affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>
 #map_bcast_d0  = affine_map<(d0, d1, d2, d3) -> (0, d1, d2, d3)>
