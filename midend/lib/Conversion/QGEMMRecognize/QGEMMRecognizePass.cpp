@@ -21,6 +21,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "CandidateRoots.h"
+#include "OperatorWalk.h"
 
 #include "Conversion/QGEMMRecognize/QGEMMRecognizePass.h"
 
@@ -44,20 +45,20 @@ struct QGEMMRecognizePass
   }
 
   QGEMMRecognizePass() = default;
-  QGEMMRecognizePass(const QGEMMRecognizePass &other)
-      : PassWrapper(other) {}
+  QGEMMRecognizePass(const QGEMMRecognizePass &other) : PassWrapper(other) {}
 
-  Option<bool> explain{
-      *this, "explain",
-      llvm::cl::desc("Explain rejected QGEMM candidates"),
-      llvm::cl::init(false)};
+  Option<bool> explain{*this, "explain",
+                       llvm::cl::desc("Explain rejected QGEMM candidates"),
+                       llvm::cl::init(false)};
 
   void runOnOperation() override {
     func::FuncOp funcOp = getOperation();
     SmallVector<buddy::QGEMMCandidateRoot> candidates =
         buddy::findQGEMMCandidateRoots(funcOp);
     LLVM_DEBUG(llvm::dbgs() << "[qgemm-recognize] candidates: "
-                             << candidates.size() << "\n");
+                            << candidates.size() << "\n");
+    for (const buddy::QGEMMCandidateRoot &candidate : candidates)
+      (void)buddy::walkQGEMMOperator(candidate);
   }
 };
 

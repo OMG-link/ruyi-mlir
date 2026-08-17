@@ -106,7 +106,6 @@ void registerStaticizeMemRefLayoutPass();
 void registerConvertMemcpyToGPUPass();
 void registerLegalizeShmemOutliningPass();
 void registerMatMulTransposeBVecPass();
-void registerLegalizeShmemOutliningPass();
 void registerVIRToVectorPass();
 void registerLinalgToVIRPass();
 void registerMatMulVectorizationBLISPass();
