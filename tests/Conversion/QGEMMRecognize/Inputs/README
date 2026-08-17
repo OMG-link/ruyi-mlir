@@ -1,0 +1,15 @@
+# QGEMM recognizer capture inputs
+
+The six `.ttshared.mlir` files in this directory are copies of the measured
+captures in `benchmark/mlir/`:
+
+- `q80_q80_strict.ttshared.mlir`
+- `q80_q80_partition.ttshared.mlir`
+- `q40_q80_canonical.ttshared.mlir`
+- `q4k_q8k_canonical.ttshared.mlir`
+- `iq2xxs_q8k_canonical.ttshared.mlir`
+- `synthetic_l3_canonical.ttshared.mlir`
+
+They are kept inside `buddy-mlir` so that its lit tests run independently of
+the workspace-root repository. Regenerate these copies when the corresponding
+WP A2 reference kernels or their captured IR change.
