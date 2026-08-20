@@ -57,8 +57,13 @@ struct QGEMMRecognizePass
         buddy::findQGEMMCandidateRoots(funcOp);
     LLVM_DEBUG(llvm::dbgs() << "[qgemm-recognize] candidates: "
                             << candidates.size() << "\n");
-    for (const buddy::QGEMMCandidateRoot &candidate : candidates)
-      (void)buddy::walkQGEMMOperator(candidate);
+    for (const buddy::QGEMMCandidateRoot &candidate : candidates) {
+      buddy::QGEMMOperatorWalk walk = buddy::walkQGEMMOperator(candidate);
+      LLVM_DEBUG(llvm::dbgs()
+                 << "[qgemm-recognize] op " << candidate.index
+                 << " walk: ops=" << walk.operations.size()
+                 << " boundaries=" << walk.boundaries.size() << "\n");
+    }
   }
 };
 

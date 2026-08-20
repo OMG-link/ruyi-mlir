@@ -1,0 +1,15 @@
+# QGEMM dimension-transform simplification inputs
+
+The capture inputs in this directory are copies of measured captures in
+`benchmark/mlir/`:
+
+- `q80_q80_layout_trans_reshape.ttshared.mlir`
+- `q80_q80_layout_reshape_trans_reshape.ttshared.mlir`
+- `q40_q80_canonical.ttshared.mlir`
+
+These three capture files are kept inside `buddy-mlir` so that its
+dimension-transform lit tests run independently of the workspace-root
+repository. `q80_one_candidate.mlir` is a self-contained canonical-form
+fragment used by the forwarding test rather than a measured capture.
+Regenerate the capture copies when the corresponding benchmark kernels or
+their captured IR change.

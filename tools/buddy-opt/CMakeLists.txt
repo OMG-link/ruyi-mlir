@@ -54,6 +54,7 @@ target_link_libraries(buddy-opt
   VIRToVectorPass
   QGEMMTilingPass
   QGEMMRecognizePass
+  QGEMMDimTransformPass
   TosaElementwiseFusion
   AssumeTightMemRefLayoutPass
   StaticizeMemRefLayoutPass

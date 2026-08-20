@@ -26,9 +26,6 @@
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "llvm/ADT/DenseSet.h"
-#include "llvm/Support/Debug.h"
-
-#define DEBUG_TYPE "qgemm-recognize"
 
 using namespace mlir;
 
@@ -122,10 +119,6 @@ QGEMMOperatorWalk walkQGEMMOperator(QGEMMCandidateRoot candidate) {
   OperatorWalker walker(result);
   walker.run();
 
-  LLVM_DEBUG(llvm::dbgs() << "[qgemm-recognize] op " << candidate.index
-                          << " walk: ops=" << result.operations.size()
-                          << " boundaries=" << result.boundaries.size()
-                          << "\n");
   return result;
 }
 
