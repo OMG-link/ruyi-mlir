@@ -10,7 +10,7 @@
 #identity3 = affine_map<(d0, d1, d2) -> (d0, d1, d2)>
 
 // CHECK: [qgemm-recognize] candidates: 1
-// CHECK: [qgemm-recognize] op 0 walk: ops=9 boundaries=10
+// CHECK: [qgemm-recognize] op 0 walk: ops=7 boundaries=10
 // CHECK-LABEL: func.func @iq2xxs_walk
 // CHECK: bufferization.to_tensor
 // CHECK: bufferization.to_tensor

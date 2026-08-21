@@ -4,16 +4,16 @@
 // RUN: buddy-opt --debug-only=qgemm-recognize --qgemm-recognize %s 2>&1 | FileCheck %s
 //
 // A compact Q4_K-style diamond. Both paths share the activation broadcast and
-// the linalg.fill destination used to initialize their reductions. The walk
-// must visit shared operations once, follow both merge operands, and stop at
-// the three tensor block arguments.
+// the root-neutral linalg.fill initializer used by their reductions. The walk
+// must visit shared operations once, treat the fill as a shared boundary, and
+// stop at the three tensor block arguments.
 
 #broadcast_m = affine_map<(d0, d1, d2) -> (d0, 0, d2)>
 #broadcast_n = affine_map<(d0, d1, d2) -> (0, d1, d2)>
 #identity3 = affine_map<(d0, d1, d2) -> (d0, d1, d2)>
 
 // CHECK: [qgemm-recognize] candidates: 1
-// CHECK: [qgemm-recognize] op 0 walk: ops=11 boundaries=9
+// CHECK: [qgemm-recognize] op 0 walk: ops=9 boundaries=9
 // CHECK-LABEL: func.func @q4k_shared_walk
 // CHECK: arith.subf
 // CHECK: linalg.reduce

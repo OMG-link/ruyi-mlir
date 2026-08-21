@@ -157,3 +157,177 @@ func.func @rejected_and_independent_valid(%bad_lhs: tensor<4x1x4xf32>,
 // DEFAULT-IR: outs(%{{.*}} : tensor<4xf32>) dimensions = [1, 2]
 // DEFAULT-IR: linalg.reduce ins(%{{.*}} : tensor<4x4x4xf32>)
 // DEFAULT-IR: outs(%{{.*}} : tensor<4x4xf32>) dimensions = [2]
+
+// The next function shares only a tensor.empty destination between two
+// otherwise independent products.  The shared empty must remain root-neutral.
+// DEFAULT-TRACE: [qgemm-recognize] candidates: 2
+// DEFAULT-TRACE: [qgemm-recognize] op 0 walk: ops={{[0-9]+}} boundaries={{[0-9]+}}
+// DEFAULT-TRACE: [qgemm-recognize] op 1 walk: ops={{[0-9]+}} boundaries={{[0-9]+}}
+// DEFAULT-TRACE: [qgemm-recognize] op 0 accepted: root=0
+// DEFAULT-TRACE: [qgemm-recognize] op 1 accepted: root=1
+// EXPLAIN-TRACE: [qgemm-recognize] candidates: 2
+// EXPLAIN-TRACE: [qgemm-recognize] op 0 walk: ops={{[0-9]+}} boundaries={{[0-9]+}}
+// EXPLAIN-TRACE: [qgemm-recognize] op 1 walk: ops={{[0-9]+}} boundaries={{[0-9]+}}
+// EXPLAIN-TRACE: [qgemm-recognize] op 0 accepted: root=0
+// EXPLAIN-TRACE: [qgemm-recognize] op 1 accepted: root=1
+func.func @shared_tensor_empty_boundary(%lhs_a: tensor<4x1x4xf32>,
+                                        %rhs_a: tensor<1x4x4xf32>,
+                                        %lhs_b: tensor<4x1x4xf32>,
+                                        %rhs_b: tensor<1x4x4xf32>)
+    -> tensor<4x4xf32> {
+  %shared_product_empty = tensor.empty() : tensor<4x4x4xf32>
+  %product_a = linalg.generic {
+    indexing_maps = [#broadcast_m, #broadcast_n, #identity3],
+    iterator_types = ["parallel", "parallel", "parallel"]
+  } ins(%lhs_a, %rhs_a : tensor<4x1x4xf32>, tensor<1x4x4xf32>)
+      outs(%shared_product_empty : tensor<4x4x4xf32>) {
+  ^bb0(%lhs_value: f32, %rhs_value: f32, %out: f32):
+    %value = arith.mulf %lhs_value, %rhs_value : f32
+    linalg.yield %value : f32
+  } -> tensor<4x4x4xf32>
+  %product_b = linalg.generic {
+    indexing_maps = [#broadcast_m, #broadcast_n, #identity3],
+    iterator_types = ["parallel", "parallel", "parallel"]
+  } ins(%lhs_b, %rhs_b : tensor<4x1x4xf32>, tensor<1x4x4xf32>)
+      outs(%shared_product_empty : tensor<4x4x4xf32>) {
+  ^bb0(%lhs_value: f32, %rhs_value: f32, %out: f32):
+    %value = arith.mulf %lhs_value, %rhs_value : f32
+    linalg.yield %value : f32
+  } -> tensor<4x4x4xf32>
+  %zero = arith.constant 0.0 : f32
+  %final_a_empty = tensor.empty() : tensor<4x4xf32>
+  %final_a_init = linalg.fill ins(%zero : f32)
+      outs(%final_a_empty : tensor<4x4xf32>) -> tensor<4x4xf32>
+  %final_a = linalg.reduce ins(%product_a : tensor<4x4x4xf32>)
+      outs(%final_a_init : tensor<4x4xf32>) dimensions = [2]
+    (%in: f32, %acc: f32) {
+      %sum = arith.addf %in, %acc : f32
+      linalg.yield %sum : f32
+    }
+  %final_b_empty = tensor.empty() : tensor<4x4xf32>
+  %final_b_init = linalg.fill ins(%zero : f32)
+      outs(%final_b_empty : tensor<4x4xf32>) -> tensor<4x4xf32>
+  %final_b = linalg.reduce ins(%product_b : tensor<4x4x4xf32>)
+      outs(%final_b_init : tensor<4x4xf32>) dimensions = [2]
+    (%in: f32, %acc: f32) {
+      %sum = arith.addf %in, %acc : f32
+      linalg.yield %sum : f32
+    }
+  return %final_a : tensor<4x4xf32>
+}
+
+// This function shares a pure-tensor fill result between two final
+// reductions.  Traversal must stop at the fill and must not claim its empty
+// destination for either root.
+// DEFAULT-TRACE: [qgemm-recognize] candidates: 2
+// DEFAULT-TRACE: [qgemm-recognize] op 0 walk: ops={{[0-9]+}} boundaries={{[0-9]+}}
+// DEFAULT-TRACE: [qgemm-recognize] op 1 walk: ops={{[0-9]+}} boundaries={{[0-9]+}}
+// DEFAULT-TRACE: [qgemm-recognize] op 0 accepted: root=0
+// DEFAULT-TRACE: [qgemm-recognize] op 1 accepted: root=1
+// EXPLAIN-TRACE: [qgemm-recognize] candidates: 2
+// EXPLAIN-TRACE: [qgemm-recognize] op 0 walk: ops={{[0-9]+}} boundaries={{[0-9]+}}
+// EXPLAIN-TRACE: [qgemm-recognize] op 1 walk: ops={{[0-9]+}} boundaries={{[0-9]+}}
+// EXPLAIN-TRACE: [qgemm-recognize] op 0 accepted: root=0
+// EXPLAIN-TRACE: [qgemm-recognize] op 1 accepted: root=1
+func.func @shared_tensor_fill_boundary(%lhs_a: tensor<4x1x4xf32>,
+                                       %rhs_a: tensor<1x4x4xf32>,
+                                       %lhs_b: tensor<4x1x4xf32>,
+                                       %rhs_b: tensor<1x4x4xf32>)
+    -> tensor<4x4xf32> {
+  %product_a_empty = tensor.empty() : tensor<4x4x4xf32>
+  %product_a = linalg.generic {
+    indexing_maps = [#broadcast_m, #broadcast_n, #identity3],
+    iterator_types = ["parallel", "parallel", "parallel"]
+  } ins(%lhs_a, %rhs_a : tensor<4x1x4xf32>, tensor<1x4x4xf32>)
+      outs(%product_a_empty : tensor<4x4x4xf32>) {
+  ^bb0(%lhs_value: f32, %rhs_value: f32, %out: f32):
+    %value = arith.mulf %lhs_value, %rhs_value : f32
+    linalg.yield %value : f32
+  } -> tensor<4x4x4xf32>
+  %product_b_empty = tensor.empty() : tensor<4x4x4xf32>
+  %product_b = linalg.generic {
+    indexing_maps = [#broadcast_m, #broadcast_n, #identity3],
+    iterator_types = ["parallel", "parallel", "parallel"]
+  } ins(%lhs_b, %rhs_b : tensor<4x1x4xf32>, tensor<1x4x4xf32>)
+      outs(%product_b_empty : tensor<4x4x4xf32>) {
+  ^bb0(%lhs_value: f32, %rhs_value: f32, %out: f32):
+    %value = arith.mulf %lhs_value, %rhs_value : f32
+    linalg.yield %value : f32
+  } -> tensor<4x4x4xf32>
+  %zero = arith.constant 0.0 : f32
+  %shared_empty = tensor.empty() : tensor<4x4xf32>
+  %shared_init = linalg.fill ins(%zero : f32)
+      outs(%shared_empty : tensor<4x4xf32>) -> tensor<4x4xf32>
+  %final_a = linalg.reduce ins(%product_a : tensor<4x4x4xf32>)
+      outs(%shared_init : tensor<4x4xf32>) dimensions = [2]
+    (%in: f32, %acc: f32) {
+      %sum = arith.addf %in, %acc : f32
+      linalg.yield %sum : f32
+    }
+  %final_b = linalg.reduce ins(%product_b : tensor<4x4x4xf32>)
+      outs(%shared_init : tensor<4x4xf32>) dimensions = [2]
+    (%in: f32, %acc: f32) {
+      %sum = arith.addf %in, %acc : f32
+      linalg.yield %sum : f32
+    }
+  return %final_a : tensor<4x4xf32>
+}
+
+// This function shares a tensor-valued ConstantLike producer between two
+// products.  The boundary rule must be trait-based rather than arith.constant
+// specific so that the shared constant is not root-owned.
+// DEFAULT-TRACE: [qgemm-recognize] candidates: 2
+// DEFAULT-TRACE: [qgemm-recognize] op 0 walk: ops={{[0-9]+}} boundaries={{[0-9]+}}
+// DEFAULT-TRACE: [qgemm-recognize] op 1 walk: ops={{[0-9]+}} boundaries={{[0-9]+}}
+// DEFAULT-TRACE: [qgemm-recognize] op 0 accepted: root=0
+// DEFAULT-TRACE: [qgemm-recognize] op 1 accepted: root=1
+// EXPLAIN-TRACE: [qgemm-recognize] candidates: 2
+// EXPLAIN-TRACE: [qgemm-recognize] op 0 walk: ops={{[0-9]+}} boundaries={{[0-9]+}}
+// EXPLAIN-TRACE: [qgemm-recognize] op 1 walk: ops={{[0-9]+}} boundaries={{[0-9]+}}
+// EXPLAIN-TRACE: [qgemm-recognize] op 0 accepted: root=0
+// EXPLAIN-TRACE: [qgemm-recognize] op 1 accepted: root=1
+func.func @shared_tensor_constant_like_boundary(%rhs_a: tensor<1x4x4xf32>,
+                                                %rhs_b: tensor<1x4x4xf32>)
+    -> tensor<4x4xf32> {
+  %shared = arith.constant dense<1.0> : tensor<4x1x4xf32>
+  %product_a_empty = tensor.empty() : tensor<4x4x4xf32>
+  %product_a = linalg.generic {
+    indexing_maps = [#broadcast_m, #broadcast_n, #identity3],
+    iterator_types = ["parallel", "parallel", "parallel"]
+  } ins(%shared, %rhs_a : tensor<4x1x4xf32>, tensor<1x4x4xf32>)
+      outs(%product_a_empty : tensor<4x4x4xf32>) {
+  ^bb0(%lhs_value: f32, %rhs_value: f32, %out: f32):
+    %value = arith.mulf %lhs_value, %rhs_value : f32
+    linalg.yield %value : f32
+  } -> tensor<4x4x4xf32>
+  %product_b_empty = tensor.empty() : tensor<4x4x4xf32>
+  %product_b = linalg.generic {
+    indexing_maps = [#broadcast_m, #broadcast_n, #identity3],
+    iterator_types = ["parallel", "parallel", "parallel"]
+  } ins(%shared, %rhs_b : tensor<4x1x4xf32>, tensor<1x4x4xf32>)
+      outs(%product_b_empty : tensor<4x4x4xf32>) {
+  ^bb0(%lhs_value: f32, %rhs_value: f32, %out: f32):
+    %value = arith.mulf %lhs_value, %rhs_value : f32
+    linalg.yield %value : f32
+  } -> tensor<4x4x4xf32>
+  %zero = arith.constant 0.0 : f32
+  %final_a_empty = tensor.empty() : tensor<4x4xf32>
+  %final_a_init = linalg.fill ins(%zero : f32)
+      outs(%final_a_empty : tensor<4x4xf32>) -> tensor<4x4xf32>
+  %final_a = linalg.reduce ins(%product_a : tensor<4x4x4xf32>)
+      outs(%final_a_init : tensor<4x4xf32>) dimensions = [2]
+    (%in: f32, %acc: f32) {
+      %sum = arith.addf %in, %acc : f32
+      linalg.yield %sum : f32
+    }
+  %final_b_empty = tensor.empty() : tensor<4x4xf32>
+  %final_b_init = linalg.fill ins(%zero : f32)
+      outs(%final_b_empty : tensor<4x4xf32>) -> tensor<4x4xf32>
+  %final_b = linalg.reduce ins(%product_b : tensor<4x4x4xf32>)
+      outs(%final_b_init : tensor<4x4xf32>) dimensions = [2]
+    (%in: f32, %acc: f32) {
+      %sum = arith.addf %in, %acc : f32
+      linalg.yield %sum : f32
+    }
+  return %final_a : tensor<4x4xf32>
+}

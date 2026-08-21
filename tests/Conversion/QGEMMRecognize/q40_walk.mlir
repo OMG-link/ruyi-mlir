@@ -12,7 +12,7 @@
 #identity3 = affine_map<(d0, d1, d2) -> (d0, d1, d2)>
 
 // CHECK: [qgemm-recognize] candidates: 1
-// CHECK: [qgemm-recognize] op 0 walk: ops=14 boundaries=9
+// CHECK: [qgemm-recognize] op 0 walk: ops=11 boundaries=10
 // CHECK-LABEL: func.func @q40_walk
 // CHECK: tensor.insert_slice
 // CHECK: linalg.transpose

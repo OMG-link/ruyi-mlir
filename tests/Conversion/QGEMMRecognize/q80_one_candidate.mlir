@@ -12,7 +12,7 @@
 #broadcast_n = affine_map<(d0, d1, d2) -> (0, d1, d2)>
 
 // CHECK: [qgemm-recognize] candidates: 1
-// CHECK: [qgemm-recognize] op 0 walk: ops=11 boundaries=9
+// CHECK: [qgemm-recognize] op 0 walk: ops=9 boundaries=9
 // CHECK-LABEL: func.func @q80_one_candidate
 // CHECK: tensor.expand_shape
 // CHECK: linalg.generic

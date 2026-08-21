@@ -8,25 +8,25 @@
 // The trace is read from stderr only; stdout is discarded by the redirection
 // above.
 // Q80_STRICT: [qgemm-recognize] candidates: 1
-// Q80_STRICT: [qgemm-recognize] op 0 walk: ops=19 boundaries=13
+// Q80_STRICT: [qgemm-recognize] op 0 walk: ops=17 boundaries=13
 // Q80_STRICT: [qgemm-recognize] op 0 accepted: root=0
 
 // Q80_PARTITION: [qgemm-recognize] candidates: 1
-// Q80_PARTITION: [qgemm-recognize] op 0 walk: ops=19 boundaries=13
+// Q80_PARTITION: [qgemm-recognize] op 0 walk: ops=17 boundaries=13
 // Q80_PARTITION: [qgemm-recognize] op 0 accepted: root=0
 
 // Q40_Q80: [qgemm-recognize] candidates: 1
-// Q40_Q80: [qgemm-recognize] op 0 walk: ops=31 boundaries=16
+// Q40_Q80: [qgemm-recognize] op 0 walk: ops=26 boundaries=18
 // Q40_Q80: [qgemm-recognize] op 0 accepted: root=0
 
 // Q4K_Q8K: [qgemm-recognize] candidates: 1
-// Q4K_Q8K: [qgemm-recognize] op 0 walk: ops=85 boundaries=30
+// Q4K_Q8K: [qgemm-recognize] op 0 walk: ops=76 boundaries=36
 // Q4K_Q8K: [qgemm-recognize] op 0 accepted: root=0
 
 // IQ2XXS_Q8K: [qgemm-recognize] candidates: 1
-// IQ2XXS_Q8K: [qgemm-recognize] op 0 walk: ops=88 boundaries=33
+// IQ2XXS_Q8K: [qgemm-recognize] op 0 walk: ops=80 boundaries=44
 // IQ2XXS_Q8K: [qgemm-recognize] op 0 accepted: root=0
 
 // SYNTHETIC_L3: [qgemm-recognize] candidates: 1
-// SYNTHETIC_L3: [qgemm-recognize] op 0 walk: ops=39 boundaries=23
+// SYNTHETIC_L3: [qgemm-recognize] op 0 walk: ops=38 boundaries=26
 // SYNTHETIC_L3: [qgemm-recognize] op 0 accepted: root=0

@@ -71,3 +71,26 @@ func.func @collapse_transpose_expand(%arg0: tensor<4x4xf32>,
     }
   return %final : tensor<4x6xf32>
 }
+
+func.func @scoped_collapse_transpose_expand(%source: tensor<2x3x4xf32>)
+    -> tensor<2x2xf32> {
+  %collapsed = tensor.collapse_shape %source [[0, 1], [2]]
+      : tensor<2x3x4xf32> into tensor<6x4xf32>
+  %transpose_empty = tensor.empty() : tensor<4x6xf32>
+  %transposed = linalg.transpose ins(%collapsed : tensor<6x4xf32>)
+      outs(%transpose_empty : tensor<4x6xf32>) permutation = [1, 0]
+  %expanded = tensor.expand_shape %transposed [[0, 1], [2]]
+      output_shape [2, 2, 6]
+      : tensor<4x6xf32> into tensor<2x2x6xf32>
+  %zero = arith.constant 0.0 : f32
+  %result_empty = tensor.empty() : tensor<2x2xf32>
+  %init = linalg.fill ins(%zero : f32)
+      outs(%result_empty : tensor<2x2xf32>) -> tensor<2x2xf32>
+  %result = linalg.reduce ins(%expanded : tensor<2x2x6xf32>)
+      outs(%init : tensor<2x2xf32>) dimensions = [2]
+    (%in: f32, %acc: f32) {
+      %sum = arith.addf %in, %acc : f32
+      linalg.yield %sum : f32
+    }
+  return %result : tensor<2x2xf32>
+}

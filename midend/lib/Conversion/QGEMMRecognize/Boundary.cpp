@@ -40,11 +40,19 @@ static bool hasOnlyRankedTensorResults(Operation *op) {
                       [](Type type) { return isa<RankedTensorType>(type); });
 }
 
+static bool hasTensorResult(Operation *op) {
+  return llvm::any_of(op->getResultTypes(),
+                      [](Type type) { return isa<TensorType>(type); });
+}
+
+static bool isTensorConstantLike(Operation *op) {
+  return op->hasTrait<OpTrait::ConstantLike>() && hasTensorResult(op);
+}
+
 static bool isAdmittedQGEMMOperation(Operation *op) {
   if (isa<linalg::GenericOp, linalg::ReduceOp, linalg::TransposeOp,
-          linalg::FillOp, tensor::ExpandShapeOp, tensor::CollapseShapeOp,
-          tensor::ReshapeOp, tensor::ExtractSliceOp, tensor::InsertSliceOp>(
-          op))
+          tensor::ExpandShapeOp, tensor::CollapseShapeOp, tensor::ReshapeOp,
+          tensor::ExtractSliceOp, tensor::InsertSliceOp>(op))
     return true;
 
   // Arith operations are elementwise for tensor operands/results. Matching by
@@ -57,6 +65,11 @@ static bool isAdmittedQGEMMOperation(Operation *op) {
 
 bool isQGEMMOperatorBoundary(Operation *op) {
   if (!op || isa<tensor::EmptyOp>(op))
+    return true;
+  if (auto fill = dyn_cast<linalg::FillOp>(op))
+    if (fill.hasPureTensorSemantics())
+      return true;
+  if (isTensorConstantLike(op))
     return true;
   if (!hasOnlyRankedTensorResults(op))
     return true;

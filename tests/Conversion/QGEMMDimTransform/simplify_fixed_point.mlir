@@ -39,34 +39,34 @@
 // RUN: test "$(awk '/tensor\.expand_shape/ {e++} /tensor\.collapse_shape/ {c++} /linalg\.transpose/ {t++} END {print e + 0, c + 0, t + 0}' %t.q40_q80_canonical.first)" = "2 1 1"
 // RUN: test "$(awk '/tensor\.expand_shape/ {e++} /tensor\.collapse_shape/ {c++} /linalg\.transpose/ {t++} END {print e + 0, c + 0, t + 0}' %t.q40_q80_canonical.canonical)" = "$(awk '/tensor\.expand_shape/ {e++} /tensor\.collapse_shape/ {c++} /linalg\.transpose/ {t++} END {print e + 0, c + 0, t + 0}' %t.q40_q80_canonical.first)"
 
-// q4k_q8k_canonical: expand/collapse/transpose = 4/5/8.
+// q4k_q8k_canonical: expand/collapse/transpose = 5/5/8.
 // RUN: timeout 60 buddy-opt --qgemm-simplify-dim-transforms %S/../QGEMMRecognize/Inputs/q4k_q8k_canonical.ttshared.mlir > %t.q4k_q8k_canonical.first
 // RUN: timeout 60 buddy-opt --qgemm-simplify-dim-transforms %S/../QGEMMRecognize/Inputs/q4k_q8k_canonical.ttshared.mlir > %t.q4k_q8k_canonical.second
 // RUN: diff -u %t.q4k_q8k_canonical.first %t.q4k_q8k_canonical.second
 // RUN: timeout 60 buddy-opt --qgemm-simplify-dim-transforms %t.q4k_q8k_canonical.first > %t.q4k_q8k_canonical.idempotent
 // RUN: diff -u %t.q4k_q8k_canonical.first %t.q4k_q8k_canonical.idempotent
 // RUN: timeout 8 mlir-opt --canonicalize %t.q4k_q8k_canonical.first > %t.q4k_q8k_canonical.canonical
-// RUN: test "$(awk '/tensor\.expand_shape/ {e++} /tensor\.collapse_shape/ {c++} /linalg\.transpose/ {t++} END {print e + 0, c + 0, t + 0}' %t.q4k_q8k_canonical.first)" = "4 5 8"
+// RUN: test "$(awk '/tensor\.expand_shape/ {e++} /tensor\.collapse_shape/ {c++} /linalg\.transpose/ {t++} END {print e + 0, c + 0, t + 0}' %t.q4k_q8k_canonical.first)" = "5 5 8"
 // RUN: test "$(awk '/tensor\.expand_shape/ {e++} /tensor\.collapse_shape/ {c++} /linalg\.transpose/ {t++} END {print e + 0, c + 0, t + 0}' %t.q4k_q8k_canonical.canonical)" = "$(awk '/tensor\.expand_shape/ {e++} /tensor\.collapse_shape/ {c++} /linalg\.transpose/ {t++} END {print e + 0, c + 0, t + 0}' %t.q4k_q8k_canonical.first)"
 
-// iq2xxs_q8k_canonical: expand/collapse/transpose = 5/7/5.
+// iq2xxs_q8k_canonical: expand/collapse/transpose = 11/7/5.
 // RUN: timeout 60 buddy-opt --qgemm-simplify-dim-transforms %S/../QGEMMRecognize/Inputs/iq2xxs_q8k_canonical.ttshared.mlir > %t.iq2xxs_q8k_canonical.first
 // RUN: timeout 60 buddy-opt --qgemm-simplify-dim-transforms %S/../QGEMMRecognize/Inputs/iq2xxs_q8k_canonical.ttshared.mlir > %t.iq2xxs_q8k_canonical.second
 // RUN: diff -u %t.iq2xxs_q8k_canonical.first %t.iq2xxs_q8k_canonical.second
 // RUN: timeout 60 buddy-opt --qgemm-simplify-dim-transforms %t.iq2xxs_q8k_canonical.first > %t.iq2xxs_q8k_canonical.idempotent
 // RUN: diff -u %t.iq2xxs_q8k_canonical.first %t.iq2xxs_q8k_canonical.idempotent
 // RUN: timeout 8 mlir-opt --canonicalize %t.iq2xxs_q8k_canonical.first > %t.iq2xxs_q8k_canonical.canonical
-// RUN: test "$(awk '/tensor\.expand_shape/ {e++} /tensor\.collapse_shape/ {c++} /linalg\.transpose/ {t++} END {print e + 0, c + 0, t + 0}' %t.iq2xxs_q8k_canonical.first)" = "5 7 5"
+// RUN: test "$(awk '/tensor\.expand_shape/ {e++} /tensor\.collapse_shape/ {c++} /linalg\.transpose/ {t++} END {print e + 0, c + 0, t + 0}' %t.iq2xxs_q8k_canonical.first)" = "11 7 5"
 // RUN: test "$(awk '/tensor\.expand_shape/ {e++} /tensor\.collapse_shape/ {c++} /linalg\.transpose/ {t++} END {print e + 0, c + 0, t + 0}' %t.iq2xxs_q8k_canonical.canonical)" = "$(awk '/tensor\.expand_shape/ {e++} /tensor\.collapse_shape/ {c++} /linalg\.transpose/ {t++} END {print e + 0, c + 0, t + 0}' %t.iq2xxs_q8k_canonical.first)"
 
-// synthetic_l3_canonical: expand/collapse/transpose = 6/0/0.
+// synthetic_l3_canonical: expand/collapse/transpose = 9/0/0.
 // RUN: timeout 60 buddy-opt --qgemm-simplify-dim-transforms %S/../QGEMMRecognize/Inputs/synthetic_l3_canonical.ttshared.mlir > %t.synthetic_l3_canonical.first
 // RUN: timeout 60 buddy-opt --qgemm-simplify-dim-transforms %S/../QGEMMRecognize/Inputs/synthetic_l3_canonical.ttshared.mlir > %t.synthetic_l3_canonical.second
 // RUN: diff -u %t.synthetic_l3_canonical.first %t.synthetic_l3_canonical.second
 // RUN: timeout 60 buddy-opt --qgemm-simplify-dim-transforms %t.synthetic_l3_canonical.first > %t.synthetic_l3_canonical.idempotent
 // RUN: diff -u %t.synthetic_l3_canonical.first %t.synthetic_l3_canonical.idempotent
 // RUN: timeout 8 mlir-opt --canonicalize %t.synthetic_l3_canonical.first > %t.synthetic_l3_canonical.canonical
-// RUN: test "$(awk '/tensor\.expand_shape/ {e++} /tensor\.collapse_shape/ {c++} /linalg\.transpose/ {t++} END {print e + 0, c + 0, t + 0}' %t.synthetic_l3_canonical.first)" = "6 0 0"
+// RUN: test "$(awk '/tensor\.expand_shape/ {e++} /tensor\.collapse_shape/ {c++} /linalg\.transpose/ {t++} END {print e + 0, c + 0, t + 0}' %t.synthetic_l3_canonical.first)" = "9 0 0"
 // RUN: test "$(awk '/tensor\.expand_shape/ {e++} /tensor\.collapse_shape/ {c++} /linalg\.transpose/ {t++} END {print e + 0, c + 0, t + 0}' %t.synthetic_l3_canonical.canonical)" = "$(awk '/tensor\.expand_shape/ {e++} /tensor\.collapse_shape/ {c++} /linalg\.transpose/ {t++} END {print e + 0, c + 0, t + 0}' %t.synthetic_l3_canonical.first)"
 
 // q80_q80_layout_trans_reshape: expand/collapse/transpose = 2/1/2.

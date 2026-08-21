@@ -29,10 +29,13 @@ namespace buddy {
 
 /// Return true when an operation is outside the traversable QGEMM subgraph.
 ///
-/// The admitted operation set is the canonical-form Linalg/tensor shape set
-/// plus arithmetic operations whose results are ranked tensors. Operations
-/// without ranked tensor results are boundaries. tensor.empty is deliberately
-/// a boundary because it supplies a destination rather than computation.
+/// The admitted operation set is the root-owned canonical-form computation:
+/// Linalg operations and tensor shape operations, plus tensor-level arithmetic
+/// operations whose results are ranked tensors. tensor.empty, tensor-semantics
+/// linalg.fill, and tensor-result ConstantLike operations are root-neutral
+/// boundaries. They provide initialization or constant values and do not
+/// belong to any root-owned operation set. Operations without ranked tensor
+/// results are boundaries as well.
 bool isQGEMMOperatorBoundary(Operation *op);
 
 } // namespace buddy
