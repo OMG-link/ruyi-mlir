@@ -64,9 +64,9 @@ Recognition buildQGEMMRecognition(const QGEMMOperatorWalk &walk);
 
 /// Check the recognition conditions owned by this pass.
 ///
-/// The first two checks are evaluated here in their fixed order.  The
-/// cross-candidate ownership check is deliberately applied by the pass after
-/// all candidate records have been reconstructed.
+/// The three per-candidate checks are evaluated here in their fixed order.
+/// The cross-candidate ownership check is applied by the pass after all
+/// candidate records have been reconstructed.
 std::optional<Rejection> checkQGEMMLegality(const Recognition &recognition);
 
 } // namespace buddy

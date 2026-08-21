@@ -427,7 +427,7 @@ std::optional<Rejection> checkQGEMMLegality(const Recognition &recognition) {
   // Fixed check order: (1) final-result rank, (2) stage partition conflict,
   // (3) M/N core broadcast coverage, then (4) cross-candidate ownership
   // arbitration after all candidate records have been reconstructed.  The
-  // fourth check is intentionally owned by the next task.
+  // fourth check is applied by QGEMMRecognizePass.
   linalg::ReduceOp finalReduce = recognition.finalReduce;
   if (!hasRankTwoResult(finalReduce))
     return Rejection{finalReduce.getOperation(), "final-result-rank", 4};
