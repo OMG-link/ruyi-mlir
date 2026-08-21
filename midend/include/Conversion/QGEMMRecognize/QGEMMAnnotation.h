@@ -51,6 +51,8 @@ inline constexpr llvm::StringLiteral kQGEMMNodeRootField = "root";
 inline constexpr llvm::StringLiteral kQGEMMNodeStageField = "stage";
 inline constexpr llvm::StringLiteral kQGEMMRootMDimField = "m_dim";
 inline constexpr llvm::StringLiteral kQGEMMRootNDimField = "n_dim";
+inline constexpr llvm::StringLiteral kQGEMMDataPrepStage = "data_prep";
+inline constexpr llvm::StringLiteral kQGEMMComputeStage = "compute";
 
 /// Return the root identity carried by a qgemm.node annotation, if present.
 std::optional<unsigned> getQGEMMNodeRoot(Operation *op);

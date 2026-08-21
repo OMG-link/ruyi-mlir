@@ -3,6 +3,7 @@ add_mlir_library(QGEMMRecognizePass
   Boundary.cpp
   CandidateRoots.cpp
   OperatorWalk.cpp
+  Recognition.cpp
 
   LINK_LIBS PUBLIC
   MLIRArithDialect

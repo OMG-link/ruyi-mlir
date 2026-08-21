@@ -22,10 +22,12 @@
 
 #include "CandidateRoots.h"
 #include "OperatorWalk.h"
+#include "Recognition.h"
 
 #include "Conversion/QGEMMRecognize/QGEMMRecognizePass.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/AsmState.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/Support/Debug.h"
 
@@ -53,16 +55,51 @@ struct QGEMMRecognizePass
 
   void runOnOperation() override {
     func::FuncOp funcOp = getOperation();
+    AsmState asmState(funcOp.getOperation());
+    (void)asmState;
     SmallVector<buddy::QGEMMCandidateRoot> candidates =
         buddy::findQGEMMCandidateRoots(funcOp);
     LLVM_DEBUG(llvm::dbgs() << "[qgemm-recognize] candidates: "
                             << candidates.size() << "\n");
+
+    unsigned recognizedRoot = 0;
     for (const buddy::QGEMMCandidateRoot &candidate : candidates) {
       buddy::QGEMMOperatorWalk walk = buddy::walkQGEMMOperator(candidate);
       LLVM_DEBUG(llvm::dbgs()
                  << "[qgemm-recognize] op " << candidate.index
                  << " walk: ops=" << walk.operations.size()
                  << " boundaries=" << walk.boundaries.size() << "\n");
+
+      buddy::Recognition recognition = buddy::buildQGEMMRecognition(walk);
+      std::optional<buddy::Rejection> rejection =
+          buddy::checkQGEMMLegality(recognition);
+      if (rejection) {
+        LLVM_DEBUG({
+          llvm::dbgs() << "[qgemm-recognize] candidate " << candidate.index
+                       << " rejected: reason=" << rejection->reason
+                       << " section=" << rejection->section << " at=";
+          if (rejection->at)
+            llvm::dbgs() << rejection->at->getName().getStringRef();
+          else
+            llvm::dbgs() << "<null>";
+          llvm::dbgs() << " value=";
+          if (rejection->at && rejection->at->getNumResults() == 1)
+            rejection->at->getResult(0).printAsOperand(llvm::dbgs(), asmState);
+          else
+            llvm::dbgs() << "<none>";
+          llvm::dbgs() << " loc=";
+          if (rejection->at)
+            rejection->at->getLoc().print(llvm::dbgs());
+          else
+            llvm::dbgs() << "<none>";
+          llvm::dbgs() << "\n";
+        });
+        continue;
+      }
+
+      LLVM_DEBUG(llvm::dbgs() << "[qgemm-recognize] op " << candidate.index
+                              << " accepted: root=" << recognizedRoot << "\n");
+      ++recognizedRoot;
     }
   }
 };
