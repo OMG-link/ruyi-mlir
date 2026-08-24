@@ -32,6 +32,8 @@
 // FIRST-DATA-LABEL: func.func @q80_q80_strict
 // FIRST-DATA-COUNT-6: qgemm.node = {root = 0 : i64, stage = "data_prep"}
 // FIRST-DATA-NOT: qgemm.node = {root = 0 : i64, stage = "data_prep"}
+// FIRST-DATA: {{^    }}%{{[a-zA-Z0-9_]+}} = scf.for %{{[a-zA-Z0-9_]+}} = %c0{{[_0-9]*}} to %c192{{[_0-9]*}} step %c32{{[_0-9]*}}
+// FIRST-DATA-NOT: qgemm.node = {root = 0 : i64, stage = "data_prep"}
 // FIRST-COMPUTE-LABEL: func.func @q80_q80_strict
 // FIRST-COMPUTE-COUNT-11: qgemm.node = {root = 0 : i64, stage = "compute"}
 // FIRST-COMPUTE-NOT: qgemm.node = {root = 0 : i64, stage = "compute"}
@@ -58,6 +60,8 @@
 // SECOND-NODES-NOT: qgemm.node = {root =
 // SECOND-DATA-LABEL: func.func @q80_q80_strict
 // SECOND-DATA-COUNT-6: qgemm.node = {root = 0 : i64, stage = "data_prep"}
+// SECOND-DATA-NOT: qgemm.node = {root = 0 : i64, stage = "data_prep"}
+// SECOND-DATA: {{^    }}%{{[a-zA-Z0-9_]+}} = scf.for %{{[a-zA-Z0-9_]+}} = %c0{{[_0-9]*}} to %c192{{[_0-9]*}} step %c32{{[_0-9]*}}
 // SECOND-DATA-NOT: qgemm.node = {root = 0 : i64, stage = "data_prep"}
 // SECOND-COMPUTE-LABEL: func.func @q80_q80_strict
 // SECOND-COMPUTE-COUNT-11: qgemm.node = {root = 0 : i64, stage = "compute"}

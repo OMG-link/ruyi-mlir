@@ -62,6 +62,9 @@ void annotate(const Recognition &recognition, unsigned rootId);
 /// Return the root identity carried by a qgemm.node annotation, if present.
 std::optional<unsigned> getQGEMMNodeRoot(Operation *op);
 
+/// Return a valid stage carried by a qgemm.node annotation, if present.
+std::optional<llvm::StringRef> getQGEMMNodeStage(Operation *op);
+
 /// Return the M/N dimensions carried by a qgemm.root annotation, if present.
 std::optional<std::pair<unsigned, unsigned>> getQGEMMRootDims(Operation *op);
 

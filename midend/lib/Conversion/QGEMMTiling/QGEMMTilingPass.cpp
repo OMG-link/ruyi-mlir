@@ -116,6 +116,16 @@ struct QGEMMTilingPass
       if (!rootDims || !rootId || !tilingRoot)
         continue;
 
+      // A root with a valid identity and dimensions remains recoverable even
+      // when its stage metadata is absent, malformed, unknown, or data_prep.
+      // Stage is advisory for locating the root; the fusion callback still
+      // admits only same-root compute producers.
+      auto stage = buddy::getQGEMMNodeStage(rootOperation);
+      if (!stage || *stage != buddy::kQGEMMComputeStage)
+        rootOperation->emitWarning()
+            << "qgemm-tiling: tiling root does not carry stage = \"compute\"; "
+               "continuing from qgemm.root";
+
       auto tileSizes = buddy::computeTileSizes(
           tilingRoot, rootDims->first, rootDims->second, tileM, tileN, explain);
       if (failed(tileSizes))

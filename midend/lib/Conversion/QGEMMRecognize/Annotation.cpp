@@ -133,6 +133,18 @@ std::optional<unsigned> getQGEMMNodeRoot(Operation *operation) {
       getQGEMMField(operation, kQGEMMNodeAttr, kQGEMMNodeRootField));
 }
 
+std::optional<StringRef> getQGEMMNodeStage(Operation *operation) {
+  auto stage = dyn_cast_or_null<StringAttr>(
+      getQGEMMField(operation, kQGEMMNodeAttr, kQGEMMNodeStageField));
+  if (!stage)
+    return std::nullopt;
+
+  StringRef value = stage.getValue();
+  if (value != kQGEMMDataPrepStage && value != kQGEMMComputeStage)
+    return std::nullopt;
+  return value;
+}
+
 std::optional<std::pair<unsigned, unsigned>>
 getQGEMMRootDims(Operation *operation) {
   auto mDim = getNonNegativeUnsigned(
