@@ -1,10 +1,13 @@
-// RUN: buddy-opt --qgemm-tiling="tile-m=4 tile-n=4" %s 2>&1 | FileCheck %s
+// RUN: buddy-opt --debug-only=qgemm-recognize --qgemm-recognize %s 2>&1 | FileCheck %s
 
-// Verify that the DimensionClassifier bails out with a remark when more than
-// 2 broadcast dimensions are detected. The IR should pass through unchanged.
-
-// CHECK: remark:{{.*}}found 3 broadcast dimensions; expected exactly 2 (M and N)
+// The old tiling classifier is gone. Recognition applies its fixed legality
+// order first, so this rank-4 result is rejected before broadcast coverage.
+// CHECK: [qgemm-recognize] candidates: 1
+// CHECK: [qgemm-recognize] op 0 walk: ops=6 boundaries=9
+// CHECK: [qgemm-recognize] candidate 0 rejected: reason=final-result-rank section=4 at=linalg.reduce
 // CHECK-LABEL: func.func @three_broadcast_dims
+// CHECK-NOT: qgemm.node
+// CHECK-NOT: qgemm.root
 // CHECK: linalg.reduce
 // CHECK: bufferization.materialize_in_destination
 

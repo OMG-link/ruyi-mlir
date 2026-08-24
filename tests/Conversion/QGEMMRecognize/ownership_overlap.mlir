@@ -1,30 +1,33 @@
-// RUN: buddy-opt --qgemm-tiling="tile-m=4 tile-n=4" %s 2>&1 | FileCheck %s
+// RUN: buddy-opt --debug-only=qgemm-recognize --qgemm-recognize %s 2>&1 | FileCheck %s
+
+// Two candidates share one root-owned producer. Recognition rejects both by
+// the cross-candidate ownership check, without emitting tiling diagnostics.
+// CHECK: [qgemm-recognize] candidates: 2
+// CHECK: [qgemm-recognize] op 0 walk: ops=4 boundaries=6
+// CHECK: [qgemm-recognize] op 1 walk: ops=4 boundaries=6
+// CHECK: [qgemm-recognize] candidate 0 rejected: reason=shared-non-boundary-operation section=13 at=linalg.generic
+// CHECK: [qgemm-recognize] candidate 1 rejected: reason=shared-non-boundary-operation section=13 at=linalg.generic
 //
-// NOTE: This test requires the v02 pass restructuring (task 6.1) which uses
-// RootFilter for diamond detection. Until that restructuring is complete,
-// this test will not pass.
-//
-// Tests for diamond detection and skip (Requirement 2.4):
-//   Two independent reduce chains share a common element-wise producer op
-//   (diamond pattern). Both roots should be skipped with a warning, and the
-//   IR should remain unchanged.
+// Two independent candidates share a common element-wise producer. The
+// cross-candidate ownership check rejects both roots and leaves the IR
+// unannotated.
 
 // ============================================================================
-// Test: Diamond pattern — two reduce chains sharing a producer op
+// Test: two roots sharing one root-owned producer
 // ============================================================================
 // Pattern:
 //   %shared_mul = linalg.generic (element-wise multiply)
 //       ↙                    ↘
 //   %reduce1 (addf, dim=2)    %reduce2 (addf, dim=2)
 //
-// Both reduce chains include %shared_mul in their subgraphs. The RootFilter
-// detects this overlap (refcount > 1) and skips both roots with a warning.
+// Both candidate walks include %shared_mul. The ownership check rejects both
+// candidates because accepted root-owned scopes must be disjoint.
 
 #map_identity3 = affine_map<(d0, d1, d2) -> (d0, d1, d2)>
 #map_bcast_d1  = affine_map<(d0, d1, d2) -> (d0, 0, d2)>
 #map_bcast_d0  = affine_map<(d0, d1, d2) -> (0, d1, d2)>
 
-func.func @diamond_two_roots(%arg0: tensor<8x1x16xf32>,
+func.func @ownership_overlap_two_roots(%arg0: tensor<8x1x16xf32>,
                               %arg1: tensor<1x8x16xf32>) -> (tensor<8x8xf32>, tensor<8x8xf32>) {
   // Broadcast %arg0 on dim 1
   %empty0 = tensor.empty() : tensor<8x8x16xf32>
@@ -46,8 +49,8 @@ func.func @diamond_two_roots(%arg0: tensor<8x1x16xf32>,
     linalg.yield %in : f32
   } -> tensor<8x8x16xf32>
 
-  // Shared element-wise multiply — this is the diamond junction point.
-  // Both reduce chains below include this op in their subgraphs.
+  // Shared element-wise multiply — this is the shared-producer junction.
+  // Both candidate walks include this op in their root-owned scopes.
   %empty2 = tensor.empty() : tensor<8x8x16xf32>
   %shared_mul = linalg.generic {
     indexing_maps = [#map_identity3, #map_identity3, #map_identity3],
@@ -85,13 +88,15 @@ func.func @diamond_two_roots(%arg0: tensor<8x1x16xf32>,
   return %reduce1, %reduce2 : tensor<8x8xf32>, tensor<8x8xf32>
 }
 
-// Both roots share %shared_mul → diamond detected → both skipped.
+// Both roots share %shared_mul → shared-producer overlap detected → both skipped.
 // Verify the warning is emitted (at least once, both roots trigger it).
 // The warning appears in stderr (merged via 2>&1) before the IR output,
 // so it must be checked before the CHECK-LABEL.
-// CHECK: warning: qgemm-tiling: subgraph shares ops with another reduce chain root (diamond); skipping
+// The IR remains unannotated after the ownership rejection.
 
-// CHECK-LABEL: func.func @diamond_two_roots
+// CHECK-LABEL: func.func @ownership_overlap_two_roots
+// CHECK-NOT: qgemm.node
+// CHECK-NOT: qgemm.root
 
 // Verify IR is unchanged — no scf.for introduced (no tiling happened).
 // CHECK-NOT: scf.for

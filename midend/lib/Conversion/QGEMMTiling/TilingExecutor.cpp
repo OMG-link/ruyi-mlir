@@ -16,12 +16,14 @@
 //===----------------------------------------------------------------------===//
 //
 // This file implements the executeTiling utility, which applies tiling to the
-// tiling root using MLIR's SCF tile-and-fuse infrastructure and fuses all
-// producers within the contraction subgraph.
+// annotated tiling root using MLIR's SCF tile-and-fuse infrastructure and
+// identity-controlled producer fusion.
 //
 //===----------------------------------------------------------------------===//
 
 #include "TilingExecutor.h"
+
+#include "Conversion/QGEMMRecognize/QGEMMAnnotation.h"
 
 #include "mlir/Dialect/SCF/Transforms/TileUsingInterface.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -35,8 +37,7 @@ using namespace mlir;
 namespace mlir {
 namespace buddy {
 
-void executeTiling(linalg::LinalgOp tilingRoot,
-                   const ContractionSubgraph &subgraph,
+void executeTiling(linalg::LinalgOp tilingRoot, unsigned rootId,
                    ArrayRef<OpFoldResult> tileSizes) {
   // If all tile sizes are 0, nothing to tile — early return.
   bool allZero = llvm::all_of(tileSizes, [](OpFoldResult ofr) {
@@ -58,14 +59,27 @@ void executeTiling(linalg::LinalgOp tilingRoot,
   options.tilingOptions.setTileSizes(tileSizes);
   options.tilingOptions.setLoopType(scf::SCFTilingOptions::LoopType::ForOp);
 
-  // Set fusionControlFn: fuse only producers that are in subgraph.ops.
+  // Measured in task 7.1 with basic_q80.mlir: the SCF utility preserves
+  // discardable qgemm.node/qgemm.root attributes on cloned root-owned
+  // operations. A destination/outs tensor-semantics linalg.fill clone stays
+  // unannotated. Consequently this consumer deliberately has no
+  // read-then-patch or re-attachment path.
   options.setFusionControlFn(
-      [&subgraph](tensor::ExtractSliceOp candidateSliceOp,
-                  OpResult originalProducer, bool isDestinationOperand)
+      [rootId](tensor::ExtractSliceOp, OpResult originalProducer,
+               bool isDestinationOperand)
           -> std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> {
         Operation *producerOp = originalProducer.getOwner();
-        if (subgraph.ops.contains(producerOp))
+        if (auto producerRoot = getQGEMMNodeRoot(producerOp);
+            producerRoot && *producerRoot == rootId)
           return scf::SCFTileAndFuseOptions::ControlFnResult{};
+
+        // Only tensor-semantics fills have a tensor result that can reach this
+        // callback. Memref-semantics fills therefore cannot qualify here.
+        if (isDestinationOperand) {
+          if (auto fill = dyn_cast<linalg::FillOp>(producerOp);
+              fill && fill->getNumResults() != 0)
+            return scf::SCFTileAndFuseOptions::ControlFnResult{};
+        }
         return std::nullopt;
       });
 

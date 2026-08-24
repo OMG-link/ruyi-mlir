@@ -1,12 +1,14 @@
-// RUN: buddy-opt --qgemm-tiling="tile-m=32 tile-n=32" --debug-only=qgemm-tiling %s 2>&1 | FileCheck %s
-// REQUIRES: asserts
+// RUN: buddy-opt --debug-only=qgemm-recognize --qgemm-recognize %s 2>&1 | FileCheck %s
 
-// Verify that the DimensionClassifier correctly classifies dimensions for the
-// Q8_0 pattern. With broadcasts on dim 0 and dim 1, classification should
-// succeed with M=0, N=1.
-
-// CHECK: DimensionClassification: M=0 N=1
+// The annotation-driven tiling pass consumes these identities; dimension
+// classification is no longer performed in the tiling directory.
+//
+// CHECK: [qgemm-recognize] candidates: 1
+// CHECK: [qgemm-recognize] op 0 walk: ops=5 boundaries=7
+// CHECK: [qgemm-recognize] op 0 accepted: root=0
 // CHECK-LABEL: func.func @q80_classify
+// CHECK: qgemm.node = {root = 0 : i64, stage = "compute"}
+// CHECK: qgemm.root = {m_dim = 0 : i64, n_dim = 1 : i64}
 
 #map_identity4 = affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>
 #map_bcast_d0  = affine_map<(d0, d1, d2, d3) -> (0, d1, d2, d3)>

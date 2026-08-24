@@ -1,13 +1,9 @@
-// RUN: buddy-opt --qgemm-tiling %s | FileCheck %s
+// RUN: buddy-opt %s > %t.default
+// RUN: buddy-opt --qgemm-tiling %s > %t.tiled
+// RUN: cmp -s %t.default %t.tiled
+//
+// A valid function without qgemm.root is unchanged by the tiling pass.
 
-// Verify that the --qgemm-tiling pass accepts valid IR and produces unchanged
-// output when no contraction patterns are present (no-op behavior).
-
-// CHECK-LABEL: func.func @simple_add
-// CHECK-SAME:  (%[[ARG0:.*]]: tensor<64x32xf32>, %[[ARG1:.*]]: tensor<64x32xf32>) -> tensor<64x32xf32>
-// CHECK:         %[[EMPTY:.*]] = tensor.empty() : tensor<64x32xf32>
-// CHECK:         %[[RESULT:.*]] = linalg.generic
-// CHECK:         return %[[RESULT]] : tensor<64x32xf32>
 func.func @simple_add(%arg0: tensor<64x32xf32>, %arg1: tensor<64x32xf32>) -> tensor<64x32xf32> {
   %empty = tensor.empty() : tensor<64x32xf32>
   %result = linalg.generic {

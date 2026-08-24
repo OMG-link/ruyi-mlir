@@ -1,111 +1,73 @@
-// RUN: buddy-opt --qgemm-tiling="tile-m=32 tile-n=32" --qgemm-tiling="tile-m=4 tile-n=4" %s | FileCheck %s
+// RUN: buddy-opt --qgemm-simplify-dim-transforms --qgemm-recognize --qgemm-tiling="tile-m=32 tile-n=32" %S/../QGEMMRecognize/Inputs/q80_q80_strict.ttshared.mlir | tee %t.first | FileCheck %s --check-prefix=FIRST
+// RUN: FileCheck --check-prefix=FIRST-NODES --input-file=%t.first %s
+// RUN: FileCheck --check-prefix=FIRST-DATA --input-file=%t.first %s
+// RUN: FileCheck --check-prefix=FIRST-COMPUTE --input-file=%t.first %s
+// RUN: FileCheck --check-prefix=FIRST-ROOT --input-file=%t.first %s
+// RUN: FileCheck --check-prefix=FIRST-FILLS --input-file=%t.first %s
+// RUN: buddy-opt --qgemm-simplify-dim-transforms --qgemm-recognize --debug-only=qgemm-recognize %S/../QGEMMRecognize/Inputs/q80_q80_strict.ttshared.mlir 2>&1 | FileCheck %s --check-prefix=TRACE
+// RUN: buddy-opt --qgemm-tiling="tile-m=4 tile-n=4" %t.first | tee %t.second | FileCheck %s --check-prefix=SECOND
+// RUN: FileCheck --check-prefix=SECOND-NODES --input-file=%t.second %s
+// RUN: FileCheck --check-prefix=SECOND-DATA --input-file=%t.second %s
+// RUN: FileCheck --check-prefix=SECOND-COMPUTE --input-file=%t.second %s
+// RUN: FileCheck --check-prefix=SECOND-ROOT --input-file=%t.second %s
+// RUN: FileCheck --check-prefix=SECOND-FILLS --input-file=%t.second %s
 //
-// Multi-level tiling test for Q8_0 pattern (Requirements 8.1, 8.2, 9.1, 9.2).
-//
-// The Q8_0 pattern has output shape tensor<64x32xf32>.
-// First tiling (tile-m=32, tile-n=32):
-//   M=64 > 32 → outer scf.for over M (0 to 64 step 32)
-//   N=32 ≤ 32 → no N loop
-// Second tiling (tile-m=4, tile-n=4):
-//   M=32 > 4 → inner scf.for over M (0 to 32 step 4)
-//   N=32 > 4 → inner scf.for over N (0 to 32 step 4)
-//
-// Verifies:
-//   1. Outer scf.for with step 32 (M dimension)
-//   2. Inner scf.for loops with step 4 (M and N dimensions)
-//   3. Producers (broadcast, multiply, reduce) fused into innermost loop body
+// The first round deliberately includes the simplifier: without it this measured
+// capture carries 20 qgemm nodes, while the canonical pipeline produces exactly
+// 17 nodes and a walk trace of ops=17 boundaries=13 before recognition. The
+// second round consumes %t.first and does not rerun recognition.
 
-#map_identity4 = affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>
-#map_bcast_d0  = affine_map<(d0, d1, d2, d3) -> (0, d1, d2, d3)>
-#map_bcast_d1  = affine_map<(d0, d1, d2, d3) -> (d0, 0, d2, d3)>
+// TRACE: [qgemm-recognize] op 0 walk: ops=17 boundaries=13
 
-func.func @multi_level_q80(%arg0: tensor<64x1x2x32xf32>, %arg1: tensor<1x32x2x32xf32>,
-                            %out: memref<64x32xf32>) {
-  // Broadcast %arg0 on dim 1: input has shape (64, 1, 2, 32)
-  %empty0 = tensor.empty() : tensor<64x32x2x32xf32>
-  %bcast_a = linalg.generic {
-    indexing_maps = [#map_bcast_d1, #map_identity4],
-    iterator_types = ["parallel", "parallel", "parallel", "parallel"]
-  } ins(%arg0 : tensor<64x1x2x32xf32>) outs(%empty0 : tensor<64x32x2x32xf32>) {
-  ^bb0(%in: f32, %out_elem: f32):
-    linalg.yield %in : f32
-  } -> tensor<64x32x2x32xf32>
+// FIRST-LABEL: func.func @q80_q80_strict
+// FIRST: {{^    }}%{{[a-zA-Z0-9_]+}} = scf.for %{{[a-zA-Z0-9_]+}} = %c0{{[_0-9]*}} to %c192{{[_0-9]*}} step %c32{{[_0-9]*}}
+// FIRST-NOT: scf.for
+// FIRST: {{^      }}%{{[a-zA-Z0-9_]+}} = linalg.reduce{{.*}}qgemm.node = {root = 0 : i64, stage = "compute"}, qgemm.root =
+// FIRST-SAME: {m_dim = 0 : i64, n_dim = 1 : i64}
+// FIRST: {{^    }}bufferization.materialize_in_destination
 
-  // Broadcast %arg1 on dim 0: input has shape (1, 32, 2, 32)
-  %empty1 = tensor.empty() : tensor<64x32x2x32xf32>
-  %bcast_b = linalg.generic {
-    indexing_maps = [#map_bcast_d0, #map_identity4],
-    iterator_types = ["parallel", "parallel", "parallel", "parallel"]
-  } ins(%arg1 : tensor<1x32x2x32xf32>) outs(%empty1 : tensor<64x32x2x32xf32>) {
-  ^bb0(%in: f32, %out_elem: f32):
-    linalg.yield %in : f32
-  } -> tensor<64x32x2x32xf32>
+// FIRST-NODES-LABEL: func.func @q80_q80_strict
+// FIRST-NODES-COUNT-17: qgemm.node = {root =
+// FIRST-NODES-NOT: qgemm.node = {root =
+// FIRST-DATA-LABEL: func.func @q80_q80_strict
+// FIRST-DATA-COUNT-6: qgemm.node = {root = 0 : i64, stage = "data_prep"}
+// FIRST-DATA-NOT: qgemm.node = {root = 0 : i64, stage = "data_prep"}
+// FIRST-COMPUTE-LABEL: func.func @q80_q80_strict
+// FIRST-COMPUTE-COUNT-11: qgemm.node = {root = 0 : i64, stage = "compute"}
+// FIRST-COMPUTE-NOT: qgemm.node = {root = 0 : i64, stage = "compute"}
+// FIRST-ROOT-LABEL: func.func @q80_q80_strict
+// FIRST-ROOT-COUNT-1: qgemm.root = {m_dim = 0 : i64, n_dim = 1 : i64}
+// FIRST-ROOT-NOT: qgemm.root
+// FIRST-FILLS-LABEL: func.func @q80_q80_strict
+// FIRST-FILLS-NOT: linalg.fill
+// FIRST-FILLS: {{^    }}%{{[a-zA-Z0-9_]+}} = linalg.fill ins(%{{[a-zA-Z0-9_]+}} : i32) outs(%{{[a-zA-Z0-9_]+}} : tensor<192x32x16xi32>) -> tensor<192x32x16xi32>{{[[:space:]]*$}}
+// FIRST-FILLS-NOT: linalg.fill
+// FIRST-FILLS: {{^      }}%{{[a-zA-Z0-9_]+}} = linalg.fill ins(%{{[a-zA-Z0-9_]+}} : f32) outs(%{{[a-zA-Z0-9_]+}} : tensor<32x32xf32>) -> tensor<32x32xf32>{{[[:space:]]*$}}
+// FIRST-FILLS-NOT: linalg.fill
 
-  // Element-wise multiply (4D)
-  %empty2 = tensor.empty() : tensor<64x32x2x32xf32>
-  %mul = linalg.generic {
-    indexing_maps = [#map_identity4, #map_identity4, #map_identity4],
-    iterator_types = ["parallel", "parallel", "parallel", "parallel"]
-  } ins(%bcast_a, %bcast_b : tensor<64x32x2x32xf32>, tensor<64x32x2x32xf32>)
-    outs(%empty2 : tensor<64x32x2x32xf32>) {
-  ^bb0(%in0: f32, %in1: f32, %out_elem: f32):
-    %prod = arith.mulf %in0, %in1 : f32
-    linalg.yield %prod : f32
-  } -> tensor<64x32x2x32xf32>
+// SECOND-LABEL: func.func @q80_q80_strict
+// SECOND: {{^    }}%{{[a-zA-Z0-9_]+}} = scf.for %{{[a-zA-Z0-9_]+}} = %c0{{[_0-9]*}} to %c192{{[_0-9]*}} step %c32{{[_0-9]*}}
+// SECOND: {{^      }}%{{[a-zA-Z0-9_]+}} = scf.for %{{[a-zA-Z0-9_]+}} = %c0{{[_0-9]*}} to %c32{{[_0-9]*}} step %c4{{[_0-9]*}}
+// SECOND: {{^        }}%{{[a-zA-Z0-9_]+}} = scf.for %{{[a-zA-Z0-9_]+}} = %c0{{[_0-9]*}} to %c32{{[_0-9]*}} step %c4{{[_0-9]*}}
+// SECOND: {{^          }}%{{[a-zA-Z0-9_]+}} = linalg.reduce{{.*}}qgemm.node = {root = 0 : i64, stage = "compute"}, qgemm.root =
+// SECOND-SAME: {m_dim = 0 : i64, n_dim = 1 : i64}
+// SECOND: {{^    }}bufferization.materialize_in_destination
 
-  // Reduce on dim 3 (QK dimension, additive combiner)
-  %cst = arith.constant 0.0 : f32
-  %empty3 = tensor.empty() : tensor<64x32x2xf32>
-  %init3 = linalg.fill ins(%cst : f32) outs(%empty3 : tensor<64x32x2xf32>) -> tensor<64x32x2xf32>
-  %reduced3 = linalg.reduce ins(%mul : tensor<64x32x2x32xf32>)
-                            outs(%init3 : tensor<64x32x2xf32>)
-                            dimensions = [3]
-    (%in: f32, %acc: f32) {
-      %sum = arith.addf %in, %acc : f32
-      linalg.yield %sum : f32
-    }
-
-  // Reduce on dim 2 (KB dimension, additive combiner) — this is the tiling root
-  %empty4 = tensor.empty() : tensor<64x32xf32>
-  %init4 = linalg.fill ins(%cst : f32) outs(%empty4 : tensor<64x32xf32>) -> tensor<64x32xf32>
-  %reduced2 = linalg.reduce ins(%reduced3 : tensor<64x32x2xf32>)
-                            outs(%init4 : tensor<64x32xf32>)
-                            dimensions = [2]
-    (%in: f32, %acc: f32) {
-      %sum = arith.addf %in, %acc : f32
-      linalg.yield %sum : f32
-    }
-
-  // Store result
-  bufferization.materialize_in_destination %reduced2 in writable %out
-    : (tensor<64x32xf32>, memref<64x32xf32>) -> ()
-  return
-}
-
-// CHECK-LABEL: func.func @multi_level_q80
-
-// Outer M-dimension tiling loop: from 0 to 64 step 32
-// CHECK: scf.for %{{[a-z0-9_]+}} = %c0{{[_0-9]*}} to %c64{{[_0-9]*}} step %c32{{[_0-9]*}}
-
-// Inner M-dimension tiling loop: from 0 to 32 step 4
-// CHECK:   scf.for %{{[a-z0-9_]+}} = %c0{{[_0-9]*}} to %c32{{[_0-9]*}} step %c4{{[_0-9]*}}
-
-// Inner N-dimension tiling loop: from 0 to 32 step 4
-// CHECK:     scf.for %{{[a-z0-9_]+}} = %c0{{[_0-9]*}} to %c32{{[_0-9]*}} step %c4{{[_0-9]*}}
-
-// Verify all producers fused into innermost loop body:
-// broadcast A, broadcast B, element-wise multiply
-// CHECK:       linalg.generic
-// CHECK:       linalg.generic
-// CHECK:       linalg.generic
-
-// Reduce on dim 3 (QK reduction) fused into innermost body
-// CHECK:       linalg.reduce
-// CHECK:         arith.addf
-
-// Reduce on dim 2 (KB reduction) — tiling root — in innermost body
-// CHECK:       linalg.reduce
-// CHECK:         arith.addf
-
-// Verify materialize_in_destination still exists after all loops
-// CHECK: bufferization.materialize_in_destination
+// SECOND-NODES-LABEL: func.func @q80_q80_strict
+// SECOND-NODES-COUNT-17: qgemm.node = {root =
+// SECOND-NODES-NOT: qgemm.node = {root =
+// SECOND-DATA-LABEL: func.func @q80_q80_strict
+// SECOND-DATA-COUNT-6: qgemm.node = {root = 0 : i64, stage = "data_prep"}
+// SECOND-DATA-NOT: qgemm.node = {root = 0 : i64, stage = "data_prep"}
+// SECOND-COMPUTE-LABEL: func.func @q80_q80_strict
+// SECOND-COMPUTE-COUNT-11: qgemm.node = {root = 0 : i64, stage = "compute"}
+// SECOND-COMPUTE-NOT: qgemm.node = {root = 0 : i64, stage = "compute"}
+// SECOND-ROOT-LABEL: func.func @q80_q80_strict
+// SECOND-ROOT-COUNT-1: qgemm.root = {m_dim = 0 : i64, n_dim = 1 : i64}
+// SECOND-ROOT-NOT: qgemm.root
+// SECOND-FILLS-LABEL: func.func @q80_q80_strict
+// SECOND-FILLS-NOT: linalg.fill
+// SECOND-FILLS: {{^    }}%{{[a-zA-Z0-9_]+}} = linalg.fill ins(%{{[a-zA-Z0-9_]+}} : i32) outs(%{{[a-zA-Z0-9_]+}} : tensor<192x32x16xi32>) -> tensor<192x32x16xi32>{{[[:space:]]*$}}
+// SECOND-FILLS-NOT: linalg.fill
+// SECOND-FILLS: {{^          }}%{{[a-zA-Z0-9_]+}} = linalg.fill ins(%{{[a-zA-Z0-9_]+}} : f32) outs(%{{[a-zA-Z0-9_]+}} : tensor<4x4xf32>) -> tensor<4x4xf32>{{[[:space:]]*$}}
+// SECOND-FILLS-NOT: linalg.fill

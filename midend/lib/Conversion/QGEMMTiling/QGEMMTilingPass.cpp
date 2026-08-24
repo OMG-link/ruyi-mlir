@@ -14,15 +14,12 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file implements the QGEMM tiling pass that tiles M/N dimensions of
-// multi-level contraction patterns in canonicalized Linalg IR.
+// This file implements the QGEMM tiling pass. Recognition is deliberately
+// outside this pass: annotated roots and node identities are its only input.
 //
 //===----------------------------------------------------------------------===//
 
-#include "ContractionSubgraph.h"
-#include "DimensionClassifier.h"
-#include "ReduceChainAnalysis.h"
-#include "RootFilter.h"
+#include "Conversion/QGEMMRecognize/QGEMMAnnotation.h"
 #include "TileSizeComputer.h"
 #include "TilingExecutor.h"
 
@@ -42,16 +39,15 @@ using namespace mlir;
 
 namespace {
 
-/// Find all tiling roots in the function.
-/// Currently delegates to reduce-chain analysis. Future versions may
-/// combine multiple strategies here.
-static SmallVector<linalg::LinalgOp> findTilingRoots(func::FuncOp funcOp) {
-  SmallVector<linalg::ReduceOp> reduceRoots =
-      buddy::findReduceChainRoots(funcOp);
-  SmallVector<linalg::LinalgOp> roots;
-  roots.reserve(reduceRoots.size());
-  for (linalg::ReduceOp r : reduceRoots)
-    roots.push_back(cast<linalg::LinalgOp>(r.getOperation()));
+/// Find every annotated tiling root in function IR order. The vector contains
+/// operations rather than only Linalg ops so malformed hand-written
+/// annotations can be skipped safely without re-deriving recognition.
+static SmallVector<Operation *> collectAnnotatedRoots(func::FuncOp funcOp) {
+  SmallVector<Operation *> roots;
+  funcOp.walk([&](Operation *operation) {
+    if (operation->hasAttr(buddy::kQGEMMRootAttr))
+      roots.push_back(operation);
+  });
   return roots;
 }
 
@@ -61,7 +57,7 @@ struct QGEMMTilingPass
 
   StringRef getArgument() const override { return "qgemm-tiling"; }
   StringRef getDescription() const override {
-    return "Tile M/N dimensions of multi-level contraction patterns";
+    return "Tile M/N dimensions of annotated QGEMM roots";
   }
 
   QGEMMTilingPass() = default;
@@ -75,6 +71,10 @@ struct QGEMMTilingPass
       *this, "tile-n",
       llvm::cl::desc("Tile size for N dimensions (0 = no tiling)"),
       llvm::cl::init(0)};
+  Option<bool> explain{
+      *this, "explain",
+      llvm::cl::desc("Emit remarks for roots skipped by qgemm tiling"),
+      llvm::cl::init(false)};
 
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<linalg::LinalgDialect, scf::SCFDialect,
@@ -84,7 +84,7 @@ struct QGEMMTilingPass
   void runOnOperation() override {
     func::FuncOp funcOp = getOperation();
 
-    // 1. Validate pass parameters.
+    // Validate pass parameters before inspecting or changing the function.
     if (tileM < 0) {
       funcOp->emitError() << "invalid tile-m value "
                           << static_cast<int64_t>(tileM) << " (must be >= 0)";
@@ -102,61 +102,44 @@ struct QGEMMTilingPass
     if (tileM == 0 && tileN == 0)
       return;
 
-    // 2. Find all tiling roots.
-    SmallVector<linalg::LinalgOp> roots = findTilingRoots(funcOp);
+    // Recognition is the sole producer of qgemm.root. A function without one
+    // is valid non-QGEMM input and is intentionally a no-op.
+    SmallVector<Operation *> roots = collectAnnotatedRoots(funcOp);
     if (roots.empty())
-      return; // No eligible roots found — leave IR unchanged.
-
-    // 3. Collect subgraphs for each root (skip failed ones).
-    SmallVector<buddy::TilingCandidate> rawCandidates;
-    for (linalg::LinalgOp root : roots) {
-      auto subgraph = buddy::collectSubgraph(root);
-      if (failed(subgraph))
-        continue; // Subgraph collection failed — skip silently.
-      rawCandidates.push_back({root, std::move(*subgraph)});
-    }
-    if (rawCandidates.empty())
       return;
 
-    // 4. Filter out diamond-conflicting roots.
-    SmallVector<buddy::TilingCandidate> candidates =
-        buddy::filterTilingCandidates(rawCandidates);
-
-    // 5. Process each valid candidate sequentially.
     bool anyTiled = false;
-    for (auto &candidate : candidates) {
-      // Classify dimensions.
-      auto classification = buddy::classifyDimensions(candidate.subgraph);
-      if (failed(classification))
-        continue; // Skip this root.
+    for (Operation *rootOperation : roots) {
+      auto rootDims = buddy::getQGEMMRootDims(rootOperation);
+      auto rootId = buddy::getQGEMMNodeRoot(rootOperation);
+      auto tilingRoot = dyn_cast<linalg::LinalgOp>(rootOperation);
+      if (!rootDims || !rootId || !tilingRoot)
+        continue;
 
-      // Compute tile sizes.
-      auto tileSizes = buddy::computeTileSizes(candidate.tilingRoot,
-                                               *classification, tileM, tileN);
+      auto tileSizes = buddy::computeTileSizes(
+          tilingRoot, rootDims->first, rootDims->second, tileM, tileN, explain);
       if (failed(tileSizes))
-        continue; // Skip this root (dynamic dims).
+        continue;
 
-      // Check if all tile sizes are 0 (no tiling needed).
       bool allZero = llvm::all_of(*tileSizes, [](OpFoldResult ofr) {
         auto attr = dyn_cast<Attribute>(ofr);
         return attr && cast<IntegerAttr>(attr).getInt() == 0;
       });
       if (allZero)
-        continue; // Skip this root — extents ≤ tile sizes.
+        continue;
 
-      // Execute tiling.
-      buddy::executeTiling(candidate.tilingRoot, candidate.subgraph,
-                           *tileSizes);
+      // Each located root is processed independently, in the collection order.
+      // There is deliberately no overlap filter: ownership was established by
+      // recognition, while root-neutral fills are controlled by the executor.
+      buddy::executeTiling(tilingRoot, *rootId, *tileSizes);
       anyTiled = true;
     }
 
-    // 6. Run DCE and CSE if any tiling was performed.
+    // Remove dead ops left behind by tiling and merge duplicate constants and
+    // common subexpressions introduced by cloning producers into loop bodies.
     if (anyTiled) {
       IRRewriter rewriter(funcOp->getContext());
-      // Remove dead ops left behind by tiling (originals replaced by clones).
       (void)runRegionDCE(rewriter, funcOp->getRegions());
-      // Merge duplicate constants and common subexpressions introduced by
-      // cloning producers into loop bodies.
       DominanceInfo domInfo(funcOp);
       eliminateCommonSubExpressions(rewriter, domInfo, funcOp);
     }

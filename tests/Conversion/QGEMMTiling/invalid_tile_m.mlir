@@ -1,13 +1,14 @@
-// RUN: buddy-opt '--qgemm-tiling=tile-m=0' %s | FileCheck %s --check-prefix=ZERO
-// RUN: not buddy-opt '--qgemm-tiling=tile-m=-1' %s 2>&1 | FileCheck %s --check-prefix=NEG
+// RUN: buddy-opt %s > %t.default
+// RUN: buddy-opt '--qgemm-tiling=tile-m=0 tile-n=0' %s > %t.zero
+// RUN: cmp -s %t.default %t.zero
+// RUN: not buddy-opt '--qgemm-tiling=tile-m=-1' %s 2>&1 | FileCheck %s --check-prefix=NEG-M
+// RUN: not buddy-opt '--qgemm-tiling=tile-m=0 tile-n=-1' %s 2>&1 | FileCheck %s --check-prefix=NEG-N
+//
+// Both zero tile options are an exact no-op. Negative options remain hard
+// errors and name the offending option and value.
 
-// Verify that tile-m=0 is valid (no tiling on M dimension).
-// ZERO-LABEL: func.func @simple_add
-// ZERO:         %[[RESULT:.*]] = linalg.generic
-// ZERO:         return %[[RESULT]] : tensor<64x32xf32>
-
-// Verify that a negative tile-m emits an error.
-// NEG: error: invalid tile-m value -1 (must be >= 0)
+// NEG-M: error: invalid tile-m value -1 (must be >= 0)
+// NEG-N: error: invalid tile-n value -1 (must be >= 0)
 
 func.func @simple_add(%arg0: tensor<64x32xf32>, %arg1: tensor<64x32xf32>) -> tensor<64x32xf32> {
   %empty = tensor.empty() : tensor<64x32xf32>

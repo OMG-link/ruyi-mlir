@@ -16,28 +16,21 @@
 //===----------------------------------------------------------------------===//
 //
 // This file declares the executeTiling utility, which applies tiling to the
-// tiling root using MLIR's SCF tile-and-fuse infrastructure and fuses all
-// producers within the contraction subgraph.
+// annotated tiling root using MLIR's SCF tile-and-fuse infrastructure.
 //
 //===----------------------------------------------------------------------===//
 
 #ifndef QGEMM_TILING_TILING_EXECUTOR_H
 #define QGEMM_TILING_TILING_EXECUTOR_H
 
-#include "ContractionSubgraph.h"
-
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
-#include "mlir/IR/OpDefinition.h"
 
 namespace mlir {
 namespace buddy {
 
-/// Execute tiling on the tiling root, fusing all producers in the subgraph.
-///
-/// This configures SCFTileAndFuseOptions with:
-/// - The provided tile sizes
-/// - ForOp loop type
-/// - A fusionControlFn that fuses only producers within subgraph.ops
+/// Execute tiling on the annotated tiling root, fusing only producers that
+/// carry the same qgemm.node root identity. A tensor-semantics linalg.fill
+/// reached through a destination/outs edge is the sole root-neutral exception.
 ///
 /// On success, replaces all uses of the original consumer's results with the
 /// tiled replacements and erases the original tiling root if it has no
@@ -46,8 +39,7 @@ namespace buddy {
 /// Crashes (llvm_unreachable) if the tiling utility returns failure — this
 /// indicates a compiler bug since all preconditions are validated before
 /// calling this function.
-void executeTiling(linalg::LinalgOp tilingRoot,
-                   const ContractionSubgraph &subgraph,
+void executeTiling(linalg::LinalgOp tilingRoot, unsigned rootId,
                    ArrayRef<OpFoldResult> tileSizes);
 
 } // namespace buddy

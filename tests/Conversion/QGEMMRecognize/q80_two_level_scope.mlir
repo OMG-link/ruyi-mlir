@@ -1,7 +1,7 @@
-// RUN: buddy-opt --qgemm-tiling="tile-m=32 tile-n=32" --debug-only=qgemm-tiling %s 2>&1 | FileCheck %s
+// RUN: buddy-opt --debug-only=qgemm-recognize --qgemm-recognize %s 2>&1 | FileCheck %s
 // REQUIRES: asserts
 
-// Verify subgraph collection on a two-level reduction pattern (closer to real
+// Verify root-owned scope collection on a two-level reduction pattern (closer to real
 // Q8_0 × Q8_0). The pattern has:
 // - 4D broadcast generics (broadcast on dim 0 and dim 1)
 // - 4D element-wise multiply
@@ -11,18 +11,12 @@
 //
 // Expected: hasBroadcast = [true, true], reduces = 2
 
-// CHECK: Reduce chain root: {{.*}}linalg.reduce
-// CHECK: Generic (continue):
-// CHECK: Broadcast detected: iter dim 1 -> output dim 1
-// CHECK: Generic (continue):
-// CHECK: Broadcast detected: iter dim 0 -> output dim 0
-// CHECK: Generic (continue):
-// CHECK: Reduce (continue): {{.*}}linalg.reduce
-// CHECK: ContractionSubgraph collected:
-// CHECK-NEXT: ops: 11
-// CHECK-NEXT: reduces: 2
-// CHECK-NEXT: hasBroadcast: [true, true]
+// CHECK: [qgemm-recognize] candidates: 1
+// CHECK: [qgemm-recognize] op 0 walk: ops=9 boundaries=13
+// CHECK: [qgemm-recognize] op 0 accepted: root=0
 // CHECK-LABEL: func.func @q80_two_level
+// CHECK: qgemm.node = {root = 0 : i64, stage = "compute"}
+// CHECK: qgemm.root = {m_dim = 0 : i64, n_dim = 1 : i64}
 
 #map4 = affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>
 #map_bcast4_d1 = affine_map<(d0, d1, d2, d3) -> (d0, 0, d2, d3)>

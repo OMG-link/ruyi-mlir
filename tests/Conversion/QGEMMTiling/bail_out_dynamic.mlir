@@ -1,4 +1,5 @@
-// RUN: buddy-opt --qgemm-tiling="tile-m=32 tile-n=32" %s 2>&1 | FileCheck %s
+// RUN: buddy-opt --qgemm-recognize --qgemm-tiling="tile-m=32 tile-n=32 explain" %s 2>&1 | FileCheck %s --check-prefix=EXPLAIN
+// RUN: buddy-opt --qgemm-recognize --qgemm-tiling="tile-m=32 tile-n=32" %s 2>&1 | FileCheck %s --check-prefix=SILENT
 
 // Verify that when the M dimension is dynamic, the pass emits a remark
 // and leaves the IR unchanged (no tiling loops generated).
@@ -73,7 +74,11 @@ func.func @dynamic_m(%arg0: tensor<?x1x2x32xf32>, %arg1: tensor<1x32x2x32xf32>,
   return
 }
 
-// CHECK: remark{{.*}}dynamic M/N dimension in tiling root; skipping
-// CHECK-LABEL: func.func @dynamic_m
-// CHECK-NOT: scf.for
-// CHECK: linalg.reduce
+// EXPLAIN: remark{{.*}}dynamic M/N dimension in tiling root; skipping
+// EXPLAIN-LABEL: func.func @dynamic_m
+// EXPLAIN-NOT: scf.for
+// EXPLAIN: linalg.reduce
+// SILENT-NOT: remark
+// SILENT-LABEL: func.func @dynamic_m
+// SILENT-NOT: scf.for
+// SILENT: linalg.reduce
