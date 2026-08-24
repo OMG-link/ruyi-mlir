@@ -29,7 +29,6 @@
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Bufferization/Transforms/Bufferize.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Math/IR/Math.h"
@@ -43,7 +42,6 @@
 #include "mlir/Target/LLVMIR/TypeToLLVM.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/TypeSwitch.h"
-#include "llvm/Support/Casting.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/Host.h"
 #include <cstdint>
@@ -767,9 +765,14 @@ private:
           })
           .Case<memref::ExpandShapeOp>([&](memref::ExpandShapeOp op) {
             Value src = findValue(op.getSrc());
+            // getOutputShape() contains only dynamic operands. Reconstruct the
+            // complete mixed shape so static bounds in static_output_shape are
+            // not dropped when the operation is cloned into the vector loop.
             SmallVector<OpFoldResult> remappedOutputShape;
-            remappedOutputShape.reserve(op.getOutputShape().size());
-            for (OpFoldResult ofr : op.getOutputShape()) {
+            SmallVector<OpFoldResult> mixedOutputShape =
+                op.getMixedOutputShape();
+            remappedOutputShape.reserve(mixedOutputShape.size());
+            for (OpFoldResult ofr : mixedOutputShape) {
               if (auto v = dyn_cast<Value>(ofr)) {
                 remappedOutputShape.push_back(findValue(v));
               } else {
@@ -1299,7 +1302,7 @@ private:
           loc, /*lowerBound=*/ValueRange{zero}, rewriter.getDimIdentityMap(),
           /*upperBound=*/ValueRange{vlUpbound}, rewriter.getDimIdentityMap(),
           vectorWid,
-          /*iterArgs=*/std::nullopt,
+          /*iterArgs=*/ValueRange{},
           [&](OpBuilder &bb, Location bodyLoc, Value iv, ValueRange) {
             //===------------------------------------------------------------===//
             // Step 4: Convert operations inside the dynamic vector region.
@@ -1321,7 +1324,7 @@ private:
           rewriter.getDimIdentityMap(),
           /*upperBound=*/ValueRange{vlValue}, rewriter.getDimIdentityMap(),
           /*step=*/1,
-          /*iterArgs=*/std::nullopt,
+          /*iterArgs=*/ValueRange{},
           [&](OpBuilder &bb, Location bodyLoc, Value iv, ValueRange) {
             DenseMap<Value, Value> virSymbolTable;
             lowerBlock(bb, bodyLoc, &region.front(), virSymbolTable, iv,
@@ -1348,7 +1351,7 @@ private:
         b.create<affine::AffineForOp>(
             loc, ValueRange{c0}, rewriter.getDimIdentityMap(), ValueRange{cub},
             rewriter.getDimIdentityMap(), /*step=*/1,
-            /*iterArgs=*/std::nullopt,
+            /*iterArgs=*/ValueRange{},
             [&](OpBuilder &bb, Location bodyLoc, Value iv, ValueRange) {
               ivs.push_back(iv);
               emitOuter(dim + 1, bb);

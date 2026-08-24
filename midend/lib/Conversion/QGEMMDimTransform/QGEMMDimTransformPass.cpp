@@ -214,8 +214,9 @@ static ScopedOperations collectCoarseScope(func::FuncOp funcOp) {
 /// preserving the tensor semantics.
 static bool hasConstantIndexingMapResult(linalg::GenericOp genericOp) {
   return llvm::any_of(genericOp.getIndexingMapsArray(), [](AffineMap map) {
-    return llvm::any_of(map.getResults(),
-                        [](AffineExpr expr) { return isa<AffineConstantExpr>(expr); });
+    return llvm::any_of(map.getResults(), [](AffineExpr expr) {
+      return isa<AffineConstantExpr>(expr);
+    });
   });
 }
 
@@ -223,8 +224,9 @@ static bool hasConstantIndexingMapResult(linalg::GenericOp genericOp) {
 /// the generics selected by the initial coarse scope are eligible; the scope
 /// is reconstructed by the caller after replacements create reshapes and
 /// collapse operands.
-static void normalizeScopedBroadcasts(
-    func::FuncOp funcOp, const ScopedOperations &scopedOperations) {
+static void
+normalizeScopedBroadcasts(func::FuncOp funcOp,
+                          const ScopedOperations &scopedOperations) {
   SmallVector<linalg::GenericOp> candidates;
   for (Operation *operation : scopedOperations) {
     auto genericOp = dyn_cast<linalg::GenericOp>(operation);
@@ -385,8 +387,7 @@ public:
     scopedSet.insert(operation);
   }
 
-  void notifyOperationReplaced(Operation *operation,
-                               ValueRange) override {
+  void notifyOperationReplaced(Operation *operation, ValueRange) override {
     scopedSet.erase(operation);
   }
 
@@ -408,7 +409,8 @@ public:
 
   LogicalResult matchAndRewrite(linalg::TransposeOp transpose,
                                 PatternRewriter &rewriter) const override {
-    auto collapse = transpose.getInput().getDefiningOp<tensor::CollapseShapeOp>();
+    auto collapse =
+        transpose.getInput().getDefiningOp<tensor::CollapseShapeOp>();
     if (!collapse)
       return failure();
 
@@ -449,8 +451,7 @@ public:
       }
     }
 
-    if (liftedPermutation.size() !=
-        static_cast<size_t>(sourceType.getRank()))
+    if (liftedPermutation.size() != static_cast<size_t>(sourceType.getRank()))
       return failure();
 
     // Check the legality condition explicitly rather than relying on the
@@ -494,7 +495,8 @@ public:
     Value transposeInit = rewriter.create<tensor::EmptyOp>(
         transpose.getLoc(), transposedType, dynamicSizes);
     auto movedTranspose = rewriter.create<linalg::TransposeOp>(
-        transpose.getLoc(), collapse.getSrc(), transposeInit, liftedPermutation);
+        transpose.getLoc(), collapse.getSrc(), transposeInit,
+        liftedPermutation);
     auto movedCollapse = rewriter.create<tensor::CollapseShapeOp>(
         transpose.getLoc(), transpose->getResult(0).getType(),
         movedTranspose.getResult().front(), newReassociation);
@@ -573,8 +575,8 @@ public:
       if (chainLength <= 1)
         return rewriter.notifyMatchFailure(op, "chain is already minimal");
       if (headType.getRank() < resultType.getRank())
-        rewriter.replaceOpWithNewOp<tensor::ExpandShapeOp>(
-            op, resultType, head, *reassociation);
+        rewriter.replaceOpWithNewOp<tensor::ExpandShapeOp>(op, resultType, head,
+                                                           *reassociation);
       else
         rewriter.replaceOpWithNewOp<tensor::CollapseShapeOp>(
             op, resultType, head, *reassociation);
@@ -597,10 +599,10 @@ public:
     if (!toFlat || !fromFlat)
       return rewriter.notifyMatchFailure(op, "flat shape is not reachable");
 
-    Value flat = rewriter.create<tensor::CollapseShapeOp>(
-        op.getLoc(), flatType, head, *toFlat);
+    Value flat = rewriter.create<tensor::CollapseShapeOp>(op.getLoc(), flatType,
+                                                          head, *toFlat);
     rewriter.replaceOpWithNewOp<tensor::ExpandShapeOp>(op, resultType, flat,
-                                                      *fromFlat);
+                                                       *fromFlat);
     return success();
   }
 };
@@ -674,12 +676,12 @@ struct QGEMMDimTransformPass
     // number of collapse-before-expand inversions in the scope. A by-expansion
     // rewrite moves an expand_shape toward its producer and leaves any
     // type-restoring collapse_shape downstream, which is already the prescribed
-    // order. A by-collapsing rewrite is admitted only when it needs no restoring
-    // reshape and does not cross a transpose, so it cannot create an inversion
-    // that the by-expansion family can match again. Reshape-chain minimization
-    // monotonically decreases the reshape count, changes no linalg iteration
-    // domain, and is therefore independent of the collapse-before-expand
-    // inversion measure.
+    // order. A by-collapsing rewrite is admitted only when it needs no
+    // restoring reshape and does not cross a transpose, so it cannot create an
+    // inversion that the by-expansion family can match again. Reshape-chain
+    // minimization monotonically decreases the reshape count, changes no linalg
+    // iteration domain, and is therefore independent of the
+    // collapse-before-expand inversion measure.
     GreedyRewriteConfig config;
     config.setStrictness(GreedyRewriteStrictness::ExistingAndNewOps)
         .setMaxIterations(GreedyRewriteConfig::kNoLimit)

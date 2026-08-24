@@ -68,8 +68,9 @@ static bool hasSingleAdditiveCombiner(linalg::ReduceOp reduce) {
 }
 
 /// Propagate the downstream-additive-reduce mark through supported edges.
-static void propagateUpstream(Operation *op,
-                              llvm::DenseSet<Operation *> &hasDownstreamReduce) {
+static void
+propagateUpstream(Operation *op,
+                  llvm::DenseSet<Operation *> &hasDownstreamReduce) {
   for (OpOperand &operand : op->getOpOperands()) {
     if (isPropagationBoundaryEdge(op, &operand))
       continue;
@@ -82,8 +83,7 @@ static void propagateUpstream(Operation *op,
 }
 
 /// Enumerate roots in one block using a reverse scan.
-static SmallVector<linalg::ReduceOp>
-findCandidateRootsInBlock(Block &block) {
+static SmallVector<linalg::ReduceOp> findCandidateRootsInBlock(Block &block) {
   SmallVector<linalg::ReduceOp> roots;
   llvm::DenseSet<Operation *> hasDownstreamReduce;
 
@@ -114,8 +114,7 @@ findCandidateRootsInBlock(Block &block) {
 
 } // namespace
 
-SmallVector<QGEMMCandidateRoot>
-findQGEMMCandidateRoots(func::FuncOp funcOp) {
+SmallVector<QGEMMCandidateRoot> findQGEMMCandidateRoots(func::FuncOp funcOp) {
   SmallVector<linalg::ReduceOp> reductions;
   funcOp.walk([&](Block *block) {
     SmallVector<linalg::ReduceOp> blockRoots =
