@@ -1,6 +1,3 @@
-// RUN: buddy-opt %s > %t.no-pass
-// RUN: buddy-opt --qgemm-recognize %s > %t.with-pass
-// RUN: diff -u %t.no-pass %t.with-pass
 // RUN: buddy-opt --debug-only=qgemm-recognize --qgemm-recognize %s 2>&1 | FileCheck %s
 //
 // A small Q8_0-shaped canonical fragment. The two two-dimensional inputs are
@@ -21,7 +18,8 @@
 // CHECK: linalg.reduce
 // CHECK: arith.mulf
 // CHECK: linalg.reduce
-// CHECK-NOT: qgemm.node
+// CHECK-SAME: qgemm.node = {root = 0 : i64, stage = "compute"}
+// CHECK-SAME: qgemm.root = {m_dim = 0 : i64, n_dim = 1 : i64}
 func.func @q80_one_candidate(%arg0: tensor<8x32xf32>,
                               %arg1: tensor<8x32xf32>,
                               %factor: tensor<8x8x1xf32>) -> tensor<8x8xf32> {

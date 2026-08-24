@@ -45,6 +45,8 @@ class Operation;
 
 namespace buddy {
 
+struct Recognition;
+
 inline constexpr llvm::StringLiteral kQGEMMNodeAttr = "qgemm.node";
 inline constexpr llvm::StringLiteral kQGEMMRootAttr = "qgemm.root";
 inline constexpr llvm::StringLiteral kQGEMMNodeRootField = "root";
@@ -53,6 +55,9 @@ inline constexpr llvm::StringLiteral kQGEMMRootMDimField = "m_dim";
 inline constexpr llvm::StringLiteral kQGEMMRootNDimField = "n_dim";
 inline constexpr llvm::StringLiteral kQGEMMDataPrepStage = "data_prep";
 inline constexpr llvm::StringLiteral kQGEMMComputeStage = "compute";
+
+/// Attach the identity annotation for one accepted recognition result.
+void annotate(const Recognition &recognition, unsigned rootId);
 
 /// Return the root identity carried by a qgemm.node annotation, if present.
 std::optional<unsigned> getQGEMMNodeRoot(Operation *op);

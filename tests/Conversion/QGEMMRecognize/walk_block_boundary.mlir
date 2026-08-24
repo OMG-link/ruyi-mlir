@@ -1,6 +1,3 @@
-// RUN: buddy-opt %s > %t.no-pass
-// RUN: buddy-opt --qgemm-recognize %s > %t.with-pass
-// RUN: diff -u %t.no-pass %t.with-pass
 // RUN: buddy-opt --debug-only=qgemm-recognize --qgemm-recognize %s 2>&1 | FileCheck %s
 //
 // The candidate reduction is inside an scf.for body. Function arguments and
@@ -17,7 +14,8 @@
 // CHECK-LABEL: func.func @walk_block_boundary
 // CHECK: scf.for
 // CHECK: linalg.reduce
-// CHECK-NOT: qgemm.node
+// CHECK-SAME: qgemm.node = {root = 0 : i64, stage = "compute"}
+// CHECK-SAME: qgemm.root = {m_dim = 0 : i64, n_dim = 1 : i64}
 func.func @walk_block_boundary(%a: tensor<8x1x4xf32>,
                                 %b: tensor<1x8x4xf32>) -> tensor<8x8xf32> {
   %zero = arith.constant 0.0 : f32

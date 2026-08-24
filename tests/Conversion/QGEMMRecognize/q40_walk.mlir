@@ -1,6 +1,3 @@
-// RUN: buddy-opt %s > %t.no-pass
-// RUN: buddy-opt --qgemm-recognize %s > %t.with-pass
-// RUN: diff -u %t.no-pass %t.with-pass
 // RUN: buddy-opt --debug-only=qgemm-recognize --qgemm-recognize %s 2>&1 | FileCheck %s
 //
 // A Q4_0-style decoder fragment cut from the captured shape chain. The
@@ -19,7 +16,7 @@
 // CHECK: tensor.reshape
 // CHECK: tensor.collapse_shape
 // CHECK: tensor.expand_shape
-// CHECK-NOT: qgemm.node
+// CHECK: qgemm.node = {root = 0 : i64, stage = "compute"}
 func.func @q40_walk(%activation: tensor<8x1x32xf32>,
                      %packed0: tensor<1x8x16xf32>,
                      %packed1: tensor<1x8x16xf32>) -> tensor<8x8xf32> {

@@ -1,6 +1,3 @@
-// RUN: buddy-opt %s > %t.no-pass
-// RUN: buddy-opt --qgemm-recognize %s > %t.with-pass
-// RUN: diff -u %t.no-pass %t.with-pass
 // RUN: buddy-opt --debug-only=qgemm-recognize --qgemm-recognize %s 2>&1 | FileCheck %s
 //
 // This is the three-level reduction chain from synthetic_l3_canonical. Every
@@ -20,7 +17,8 @@
 // CHECK: tensor.expand_shape
 // CHECK: linalg.reduce
 // CHECK: linalg.reduce
-// CHECK-NOT: qgemm.node
+// CHECK-SAME: qgemm.node = {root = 0 : i64, stage = "compute"}
+// CHECK-SAME: qgemm.root = {m_dim = 0 : i64, n_dim = 1 : i64}
 func.func @three_level_chain(%lhs: tensor<32x1x1024xf32>,
                               %rhs: tensor<1x16x1024xf32>,
                               %factor1: tensor<32x16x32xf32>,

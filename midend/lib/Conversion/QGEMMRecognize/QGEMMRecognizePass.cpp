@@ -24,6 +24,8 @@
 #include "OperatorWalk.h"
 #include "Recognition.h"
 
+#include "Conversion/QGEMMRecognize/QGEMMAnnotation.h"
+
 #include "Conversion/QGEMMRecognize/QGEMMRecognizePass.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -166,6 +168,7 @@ struct QGEMMRecognizePass
         continue;
       }
 
+      buddy::annotate(record.recognition, recognizedRoot);
       LLVM_DEBUG(llvm::dbgs()
                  << "[qgemm-recognize] op " << record.candidate.index
                  << " accepted: root=" << recognizedRoot << "\n");

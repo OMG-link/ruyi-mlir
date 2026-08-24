@@ -1,6 +1,3 @@
-// RUN: buddy-opt %s > %t.no-pass
-// RUN: buddy-opt --qgemm-recognize %s > %t.with-pass
-// RUN: diff -u %t.no-pass %t.with-pass
 // RUN: buddy-opt --debug-only=qgemm-recognize --qgemm-recognize %s 2>&1 | FileCheck %s
 //
 // A compact Q4_K-style diamond. Both paths share the activation broadcast and
@@ -17,7 +14,8 @@
 // CHECK-LABEL: func.func @q4k_shared_walk
 // CHECK: arith.subf
 // CHECK: linalg.reduce
-// CHECK-NOT: qgemm.node
+// CHECK-SAME: qgemm.node = {root = 0 : i64, stage = "compute"}
+// CHECK-SAME: qgemm.root = {m_dim = 0 : i64, n_dim = 1 : i64}
 func.func @q4k_shared_walk(%activation: tensor<192x1x512xf32>,
                             %main_weight: tensor<1x32x512xf32>,
                             %zero_weight: tensor<1x32x512xf32>)

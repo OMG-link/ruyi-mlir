@@ -1,6 +1,3 @@
-// RUN: buddy-opt %s > %t.no-pass
-// RUN: buddy-opt --qgemm-recognize %s > %t.with-pass
-// RUN: diff -u %t.no-pass %t.with-pass
 // RUN: buddy-opt --debug-only=qgemm-recognize --qgemm-recognize %s 2>&1 | FileCheck %s
 //
 // This is the two-path level-1 fragment of q4k_q8k_canonical. Both paths
@@ -20,7 +17,8 @@
 // CHECK: linalg.reduce
 // CHECK: arith.subf
 // CHECK: linalg.reduce
-// CHECK-NOT: qgemm.node
+// CHECK-SAME: qgemm.node = {root = 0 : i64, stage = "compute"}
+// CHECK-SAME: qgemm.root = {m_dim = 0 : i64, n_dim = 1 : i64}
 func.func @two_path_merge(%main_lhs: tensor<192x1x512xf32>,
                            %main_rhs: tensor<1x32x512xf32>,
                            %zero_lhs: tensor<192x1x512xf32>,

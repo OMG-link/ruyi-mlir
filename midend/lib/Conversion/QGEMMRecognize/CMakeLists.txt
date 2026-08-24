@@ -4,6 +4,7 @@ add_mlir_library(QGEMMRecognizePass
   CandidateRoots.cpp
   OperatorWalk.cpp
   Recognition.cpp
+  Annotation.cpp
 
   LINK_LIBS PUBLIC
   MLIRArithDialect
