@@ -22,8 +22,11 @@
 
 #include "Recognition.h"
 
+#include "LoadChain.h"
+
 #include "Conversion/QGEMMRecognize/QGEMMAnnotation.h"
 
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/AffineExpr.h"
@@ -408,6 +411,28 @@ Recognition buildQGEMMRecognition(const QGEMMOperatorWalk &walk) {
   for (const QGEMMBoundary &boundary : walk.boundaries) {
     if (boundary.producer)
       recognition.boundaries.insert(boundary.producer);
+  }
+
+  // Each operand's memref source chain belongs to the operator with stage
+  // data_prep.  Scalar ops, index ops, memref.dim and constants are not part
+  // of the chain: the offset index_cast is shared with the output store
+  // chain, so admitting it would put one op under two owners.
+  if (recognition.finalReduce) {
+    Operation *reduce = recognition.finalReduce.getOperation();
+    auto parentFunction = reduce->getParentOfType<func::FuncOp>();
+    QGEMMLoadChainState state;
+    for (const QGEMMBoundary &boundary : walk.boundaries) {
+      collectQGEMMLoadChain(
+          boundary.value, boundary.producer,
+          [&](Operation *operation) {
+            return parentFunction &&
+                   operation->getParentOfType<func::FuncOp>() == parentFunction;
+          },
+          [&](Operation *operation) {
+            recognition.loadChainOps.insert(operation);
+          },
+          state);
+    }
   }
 
   if (recognition.finalReduce &&

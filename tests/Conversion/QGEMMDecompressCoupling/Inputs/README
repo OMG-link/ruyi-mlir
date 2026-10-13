@@ -1,0 +1,25 @@
+# QGEMM decompression-coupling capture inputs
+
+The `.ttshared.mlir` files in this directory are copies of the measured
+captures in `benchmark/mlir/`:
+
+- `q80_q80_strict.ttshared.mlir`
+- `q40_q80_canonical.ttshared.mlir`
+- `q4k_q8k_canonical.ttshared.mlir`
+- `iq2xxs_q8k_canonical.ttshared.mlir`
+
+They are kept inside `buddy-mlir` so that its lit tests run independently of
+the workspace-root repository. Regenerate these copies when the corresponding
+reference kernels or their captured IR change.
+
+`q80_q80_kb1.ttshared.mlir` is not a copy of a `benchmark/mlir/` capture. It is
+the `ttshared.mlir` stage of `benchmark/kernels/q80_q80_strict.py` compiled at
+M=64, N=32, K=32, T=1 (one quantization block along K), dumped through
+`TRITON_SHARED_DUMP_PATH`, and is the input of `load_chain_kb1.mlir`.
+Each `*_noalias.ttshared.mlir` file is the capture of the same name with
+`llvm.noalias` added to every memref argument, i.e. the IR that
+`--mark-noalias-args` produces under `no_alias=True`. Load_Copy_Forwarding
+forwards the load copies of a capture only with that attribute, so the tests
+that expect forwarding read the `_noalias` copy; `load_chain_no_noalias.mlir`
+reads the unmarked capture and expects every copy kept. Regenerate a
+`_noalias` file from its unmarked capture whenever that capture changes.

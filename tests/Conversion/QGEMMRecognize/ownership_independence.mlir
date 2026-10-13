@@ -1,7 +1,7 @@
 // RUN: buddy-opt --mlir-disable-threading --debug-only=qgemm-recognize --qgemm-recognize %s > %t.default 2> %t.default.stderr
 // RUN: buddy-opt --mlir-disable-threading --debug-only=qgemm-recognize --qgemm-recognize="explain=true" %s > %t.explain 2> %t.explain.stderr
 // RUN: buddy-opt --mlir-disable-threading %s > %t.input
-// RUN: FileCheck %s --check-prefix=DEFAULT-DIAG < %t.default.stderr
+// RUN: FileCheck %s --check-prefix=DEFAULT-DIAG --implicit-check-not=error: --implicit-check-not=warning: --implicit-check-not="remark: qgemm-recognize: rejected candidate" < %t.default.stderr
 // RUN: FileCheck %s --check-prefix=DEFAULT-TRACE --implicit-check-not=shared-non-boundary-operation < %t.default.stderr
 // RUN: FileCheck %s --check-prefix=EXPLAIN-DIAG < %t.explain.stderr
 // RUN: FileCheck %s --check-prefix=EXPLAIN-TRACE --implicit-check-not=shared-non-boundary-operation < %t.explain.stderr
@@ -18,10 +18,12 @@
 #broadcast_n = affine_map<(d0, d1, d2) -> (0, d1, d2)>
 #broadcast_both = affine_map<(d0, d1, d2) -> (0, 0, d2)>
 
-// DEFAULT-DIAG-NOT: error:
-// DEFAULT-DIAG-NOT: warning:
-// DEFAULT-DIAG-NOT: remark:
-// DEFAULT-DIAG-NOT: note:
+// The to_tensor of the first function is a load chain op of both roots, so it
+// is demoted to a root-neutral boundary and reported exactly once as Remark
+// R4 instead of rejecting either candidate (Req 14.4, 14.5).  Errors,
+// warnings and rejection remarks stay excluded through the RUN line.
+// DEFAULT-DIAG-COUNT-1: remark: qgemm-recognize: load-chain operation is shared by roots 0, 1; left root-neutral instead of rejecting the candidates
+// DEFAULT-DIAG-NOT: remark: qgemm-recognize: load-chain operation is shared
 // EXPLAIN-DIAG-COUNT-1: remark: qgemm-recognize: rejected candidate: reason=final-result-rank section=4
 // EXPLAIN-DIAG-NOT: remark: qgemm-recognize: rejected candidate:
 // EXPLAIN-DIAG-NOT: error:

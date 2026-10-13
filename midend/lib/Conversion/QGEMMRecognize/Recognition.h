@@ -42,6 +42,12 @@ struct Recognition {
   llvm::SetVector<Operation *> ops;
   llvm::SetVector<Operation *> boundaries;
   llvm::DenseSet<Operation *> dataPrepOps;
+  /// The operand load chains of this operator, in walk order.  They are
+  /// data preparation by definition: the chain expresses an input's real
+  /// memory layout, from the physical load to the logical shape.  They are
+  /// kept apart from `ops` because the stage analysis walks only the
+  /// computational part and every chain op is `data_prep` unconditionally.
+  llvm::SetVector<Operation *> loadChainOps;
   unsigned mDim = 0;
   unsigned nDim = 1;
   llvm::DenseMap<Operation *, StringRef> stages;

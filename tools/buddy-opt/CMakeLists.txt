@@ -55,6 +55,7 @@ target_link_libraries(buddy-opt
   QGEMMTilingPass
   QGEMMRecognizePass
   QGEMMDimTransformPass
+  QGEMMDecompressCouplingPass
   TosaElementwiseFusion
   AssumeTightMemRefLayoutPass
   StaticizeMemRefLayoutPass

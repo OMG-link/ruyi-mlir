@@ -23,6 +23,7 @@
 
 #include "../QGEMMRecognize/Boundary.h"
 #include "../QGEMMRecognize/CandidateRoots.h"
+#include "../QGEMMRecognize/LoadChain.h"
 #include "../QGEMMRecognize/OperatorWalk.h"
 
 #include "Conversion/QGEMMDimTransform/QGEMMDimTransformPass.h"
@@ -81,85 +82,11 @@ static void addScopedOperation(func::FuncOp funcOp, Operation *operation,
     scopedOperations.insert(operation);
 }
 
-/// Follow the memory-side source path hidden behind a tensor boundary.
-///
-/// OperatorWalk intentionally stops at bufferization.to_tensor and memref
-/// results. The layout expression for an input is nevertheless part of the
-/// simplifier's coarse scope. In the captured IR the source path commonly has
-/// the form
-///
-///   memref.reinterpret_cast -> memref.copy -> memref.alloc
-///       -> bufferization.to_tensor
-///
-/// so the walk below follows the defining operands and, for an allocation,
-/// the copy that fills it. It only crosses the source-producing memref ops
-/// listed here; arbitrary users and unrelated memory computations remain out
-/// of scope.
-static void
-collectMemrefSourceChain(func::FuncOp funcOp, Value value, Operation *producer,
-                         ScopedOperations &scopedOperations,
-                         llvm::DenseSet<Operation *> &scopedSet,
-                         llvm::DenseSet<Value> &visitedValues,
-                         llvm::DenseSet<Operation *> &visitedOperations) {
-  if (!value || !visitedValues.insert(value).second)
-    return;
-
-  if (!producer)
-    producer = value.getDefiningOp();
-  if (!isInFunction(funcOp, producer))
-    return;
-  if (!visitedOperations.insert(producer).second)
-    return;
-
-  // A boundary which is already admitted by the shared walk is not a source
-  // chain to recover. This keeps the source tracing tied to Boundary's
-  // classification rather than introducing a second admission predicate.
-  if (!buddy::isQGEMMOperatorBoundary(producer))
-    return;
-
-  if (isa<bufferization::ToTensorOp>(producer)) {
-    addScopedOperation(funcOp, producer, scopedOperations, scopedSet);
-    collectMemrefSourceChain(funcOp, producer->getOperand(0), nullptr,
-                             scopedOperations, scopedSet, visitedValues,
-                             visitedOperations);
-    return;
-  }
-
-  if (isa<memref::AllocOp>(producer)) {
-    addScopedOperation(funcOp, producer, scopedOperations, scopedSet);
-    Value allocation = producer->getResult(0);
-    for (Operation *user : allocation.getUsers()) {
-      auto copy = dyn_cast<memref::CopyOp>(user);
-      if (!copy || copy.getTarget() != allocation)
-        continue;
-      addScopedOperation(funcOp, copy.getOperation(), scopedOperations,
-                         scopedSet);
-      collectMemrefSourceChain(funcOp, copy.getSource(), nullptr,
-                               scopedOperations, scopedSet, visitedValues,
-                               visitedOperations);
-    }
-    return;
-  }
-
-  // Reinterpret-cast is the required memref-side dimension transform. The
-  // other source-only view transforms are included so a static chain can be
-  // traced through them without admitting unrelated memref computations.
-  if (isa<memref::ReinterpretCastOp, memref::CastOp, memref::SubViewOp,
-          memref::ExpandShapeOp, memref::CollapseShapeOp>(producer)) {
-    addScopedOperation(funcOp, producer, scopedOperations, scopedSet);
-    if (producer->getNumOperands() != 0)
-      collectMemrefSourceChain(funcOp, producer->getOperand(0), nullptr,
-                               scopedOperations, scopedSet, visitedValues,
-                               visitedOperations);
-  }
-}
-
 /// Build the operation list that the scoped greedy driver is allowed to see.
 static ScopedOperations collectCoarseScope(func::FuncOp funcOp) {
   ScopedOperations scopedOperations;
   llvm::DenseSet<Operation *> scopedSet;
-  llvm::DenseSet<Value> visitedBoundaryValues;
-  llvm::DenseSet<Operation *> visitedSourceOperations;
+  buddy::QGEMMLoadChainState loadChainState;
 
   for (const buddy::QGEMMCandidateRoot &candidate :
        buddy::findQGEMMCandidateRoots(funcOp)) {
@@ -170,10 +97,17 @@ static ScopedOperations collectCoarseScope(func::FuncOp funcOp) {
     for (Operation *operation : walk.operations)
       addScopedOperation(funcOp, operation, scopedOperations, scopedSet);
 
+    // The operand load chain behind each tensor boundary is part of the
+    // coarse scope.  Membership is decided by the shared walk so that the
+    // simplifier and the recognizer cannot disagree on it.
     for (const buddy::QGEMMBoundary &boundary : walk.boundaries) {
-      collectMemrefSourceChain(funcOp, boundary.value, boundary.producer,
-                               scopedOperations, scopedSet,
-                               visitedBoundaryValues, visitedSourceOperations);
+      buddy::collectQGEMMLoadChain(
+          boundary.value, boundary.producer,
+          [&](Operation *operation) { return isInFunction(funcOp, operation); },
+          [&](Operation *operation) {
+            addScopedOperation(funcOp, operation, scopedOperations, scopedSet);
+          },
+          loadChainState);
     }
   }
 

@@ -1,0 +1,21 @@
+add_mlir_library(QGEMMDecompressCouplingPass
+  QGEMMDecompressCouplingPass.cpp
+  AxisTracker.cpp
+  Separator.cpp
+  ForwardReadOnlyCopy.cpp
+  LogicalGraph.cpp
+  Placement.cpp
+  RuleTable.cpp
+  Rebuilder.cpp
+  LINK_LIBS PUBLIC
+  QGEMMRecognizePass
+  MLIRArithDialect
+  MLIRBufferizationDialect
+  MLIRFuncDialect
+  MLIRMemRefDialect
+  MLIRIR
+  MLIRLinalgDialect
+  MLIRPass
+  MLIRTensorDialect
+  MLIRTransformUtils
+)

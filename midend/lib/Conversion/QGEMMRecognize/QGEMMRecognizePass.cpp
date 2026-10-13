@@ -31,6 +31,8 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/AsmState.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "qgemm-recognize"
@@ -89,6 +91,42 @@ arbitrateOwnership(llvm::SmallVectorImpl<CandidateRecord> &records) {
   }
 }
 
+/// One accepted candidate together with the root identity it was given.
+struct AcceptedRecord {
+  CandidateRecord *record;
+  unsigned rootId;
+};
+
+/// A load-chain operation reachable from several roots has no single owner.
+/// Rather than rejecting the candidates that share it, it is demoted to a
+/// root-neutral boundary and reported once with Remark R4, so the loss of
+/// coupling freedom on that load is visible (Req 14.4, 14.5).
+static void
+demoteSharedLoadChainOps(llvm::SmallVectorImpl<AcceptedRecord> &accepted) {
+  // Candidate walk order is the only ordering input: the first accepted
+  // record that owns an operation reports it.
+  llvm::SmallVector<Operation *> shared;
+  llvm::DenseMap<Operation *, llvm::SmallVector<unsigned, 2>> sharingRoots;
+  for (const AcceptedRecord &entry : accepted) {
+    for (Operation *operation : entry.record->recognition.loadChainOps) {
+      auto &roots = sharingRoots[operation];
+      if (roots.size() == 1)
+        shared.push_back(operation);
+      roots.push_back(entry.rootId);
+    }
+  }
+
+  for (Operation *operation : shared) {
+    for (AcceptedRecord &entry : accepted)
+      entry.record->recognition.loadChainOps.remove(operation);
+
+    InFlightDiagnostic remark = operation->emitRemark();
+    remark << "qgemm-recognize: load-chain operation is shared by roots ";
+    llvm::interleaveComma(sharingRoots[operation], remark);
+    remark << "; left root-neutral instead of rejecting the candidates";
+  }
+}
+
 struct QGEMMRecognizePass
     : public PassWrapper<QGEMMRecognizePass, OperationPass<func::FuncOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(QGEMMRecognizePass)
@@ -135,6 +173,7 @@ struct QGEMMRecognizePass
     arbitrateOwnership(records);
 
     unsigned recognizedRoot = 0;
+    llvm::SmallVector<AcceptedRecord> accepted;
     for (CandidateRecord &record : records) {
       if (record.rejection) {
         const buddy::Rejection &rejection = *record.rejection;
@@ -168,12 +207,17 @@ struct QGEMMRecognizePass
         continue;
       }
 
-      buddy::annotate(record.recognition, recognizedRoot);
+      accepted.push_back({&record, recognizedRoot});
       LLVM_DEBUG(llvm::dbgs()
                  << "[qgemm-recognize] op " << record.candidate.index
                  << " accepted: root=" << recognizedRoot << "\n");
       ++recognizedRoot;
     }
+
+    demoteSharedLoadChainOps(accepted);
+
+    for (AcceptedRecord &entry : accepted)
+      buddy::annotate(entry.record->recognition, entry.rootId);
   }
 };
 

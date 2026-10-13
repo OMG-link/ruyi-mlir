@@ -117,6 +117,17 @@ void annotate(const Recognition &recognition, unsigned rootId) {
         makeNodeAttribute(operation->getContext(), rootId, stage->second));
   }
 
+  // Operand load chains are data preparation by definition (Req 14.1).  They
+  // are annotated here rather than through `stages` because the stage
+  // analysis walks only the computational part of the operator.
+  for (Operation *operation : recognition.loadChainOps) {
+    if (!operation)
+      continue;
+    operation->setAttr(kQGEMMNodeAttr,
+                       makeNodeAttribute(operation->getContext(), rootId,
+                                         kQGEMMDataPrepStage));
+  }
+
   Operation *finalReduce =
       const_cast<linalg::ReduceOp &>(recognition.finalReduce).getOperation();
   if (!recognition.ops.contains(finalReduce) ||

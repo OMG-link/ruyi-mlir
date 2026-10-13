@@ -3,12 +3,12 @@
 // RUN: FileCheck --check-prefix=Q40-DATA --input-file=%t %s
 //
 // The complete four-pass pipeline keeps all data preparation outside both
-// tiling levels. The inner 4x4 tile contains the compute broadcast, multiply,
+// tiling levels, including the 16 operand load-chain ops the recognizer owns. The inner 4x4 tile contains the compute broadcast, multiply,
 // reduction and annotated final root, while the destination write remains
 // after the loop nest.
 
 // Q40-DATA-LABEL: func.func @q40_q80_canonical
-// Q40-DATA-COUNT-15: qgemm.node = {root = 0 : i64, stage = "data_prep"}
+// Q40-DATA-COUNT-31: qgemm.node = {root = 0 : i64, stage = "data_prep"}
 // Q40-DATA-NOT: qgemm.node = {root = 0 : i64, stage = "data_prep"}
 // Q40-DATA: {{^    }}%{{[a-zA-Z0-9_]+}} = scf.for %{{[a-zA-Z0-9_]+}} = %c0{{[_0-9]*}} to %c192{{[_0-9]*}} step %c32{{[_0-9]*}}
 // Q40-DATA-NOT: qgemm.node = {root = 0 : i64, stage = "data_prep"}
@@ -16,7 +16,7 @@
 // Q40-DATA-NOT: qgemm.node = {root = 0 : i64, stage = "data_prep"}
 
 // CHECK-LABEL: func.func @q40_q80_canonical
-// CHECK-COUNT-15: qgemm.node = {root = 0 : i64, stage = "data_prep"}
+// CHECK-COUNT-31: qgemm.node = {root = 0 : i64, stage = "data_prep"}
 // CHECK-NOT: qgemm.node = {root = 0 : i64, stage = "data_prep"}
 // CHECK: {{^    }}%{{[a-zA-Z0-9_]+}} = scf.for %{{[a-zA-Z0-9_]+}} = %c0{{[_0-9]*}} to %c192{{[_0-9]*}} step %c32{{[_0-9]*}}
 // CHECK-NOT: qgemm.node = {root = 0 : i64, stage = "data_prep"}

@@ -13,9 +13,12 @@
 // RUN: FileCheck --check-prefix=SECOND-FILLS --input-file=%t.second %s
 //
 // The first round deliberately includes the simplifier: without it this measured
-// capture carries 20 qgemm nodes, while the canonical pipeline produces exactly
-// 17 nodes and a walk trace of ops=17 boundaries=13 before recognition. The
-// second round consumes %t.first and does not rerun recognition.
+// capture carries more qgemm nodes, while the canonical pipeline produces
+// exactly 33 nodes and a walk trace of ops=17 boundaries=13 before
+// recognition. The walk itself still stops at the tensor boundaries; the 16
+// extra nodes are the four operand load chains the recognizer now owns
+// (reinterpret_cast, alloc, copy, to_tensor each), all data_prep. The second
+// round consumes %t.first and does not rerun recognition.
 
 // TRACE: [qgemm-recognize] op 0 walk: ops=17 boundaries=13
 
@@ -27,10 +30,10 @@
 // FIRST: {{^    }}bufferization.materialize_in_destination
 
 // FIRST-NODES-LABEL: func.func @q80_q80_strict
-// FIRST-NODES-COUNT-17: qgemm.node = {root =
+// FIRST-NODES-COUNT-33: qgemm.node = {root =
 // FIRST-NODES-NOT: qgemm.node = {root =
 // FIRST-DATA-LABEL: func.func @q80_q80_strict
-// FIRST-DATA-COUNT-6: qgemm.node = {root = 0 : i64, stage = "data_prep"}
+// FIRST-DATA-COUNT-22: qgemm.node = {root = 0 : i64, stage = "data_prep"}
 // FIRST-DATA-NOT: qgemm.node = {root = 0 : i64, stage = "data_prep"}
 // FIRST-DATA: {{^    }}%{{[a-zA-Z0-9_]+}} = scf.for %{{[a-zA-Z0-9_]+}} = %c0{{[_0-9]*}} to %c192{{[_0-9]*}} step %c32{{[_0-9]*}}
 // FIRST-DATA-NOT: qgemm.node = {root = 0 : i64, stage = "data_prep"}
@@ -56,10 +59,10 @@
 // SECOND: {{^    }}bufferization.materialize_in_destination
 
 // SECOND-NODES-LABEL: func.func @q80_q80_strict
-// SECOND-NODES-COUNT-17: qgemm.node = {root =
+// SECOND-NODES-COUNT-33: qgemm.node = {root =
 // SECOND-NODES-NOT: qgemm.node = {root =
 // SECOND-DATA-LABEL: func.func @q80_q80_strict
-// SECOND-DATA-COUNT-6: qgemm.node = {root = 0 : i64, stage = "data_prep"}
+// SECOND-DATA-COUNT-22: qgemm.node = {root = 0 : i64, stage = "data_prep"}
 // SECOND-DATA-NOT: qgemm.node = {root = 0 : i64, stage = "data_prep"}
 // SECOND-DATA: {{^    }}%{{[a-zA-Z0-9_]+}} = scf.for %{{[a-zA-Z0-9_]+}} = %c0{{[_0-9]*}} to %c192{{[_0-9]*}} step %c32{{[_0-9]*}}
 // SECOND-DATA-NOT: qgemm.node = {root = 0 : i64, stage = "data_prep"}

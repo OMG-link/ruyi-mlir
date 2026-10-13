@@ -34,6 +34,7 @@
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/ToolOutputFile.h"
 
+#include "Conversion/QGEMMDecompressCoupling/QGEMMDecompressCouplingPass.h"
 #include "Conversion/QGEMMDimTransform/QGEMMDimTransformPass.h"
 #include "Conversion/QGEMMRecognize/QGEMMRecognizePass.h"
 #include "Conversion/QGEMMTiling/QGEMMTilingPass.h"
@@ -115,6 +116,7 @@ void registerSiLUFusionPass();
 void registerSimplifyTosaMatmulScalarPass();
 void registerEliminateMemRefCopyPass();
 void registerQGEMMDimTransformPass();
+void registerQGEMMDecompressCouplingPass();
 void registerQGEMMRecognizePass();
 void registerQGEMMTilingPass();
 } // namespace buddy
@@ -180,6 +182,7 @@ int main(int argc, char **argv) {
   mlir::buddy::registerSiLUFusionPass();
   // Register QGEMM dimension simplification, recognition and tiling passes.
   mlir::buddy::registerQGEMMDimTransformPass();
+  mlir::buddy::registerQGEMMDecompressCouplingPass();
   mlir::buddy::registerQGEMMRecognizePass();
   mlir::buddy::registerQGEMMTilingPass();
   // Register gpu passes
