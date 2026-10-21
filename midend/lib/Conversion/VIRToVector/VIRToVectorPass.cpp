@@ -29,7 +29,6 @@
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Bufferization/Transforms/Bufferize.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Math/IR/Math.h"
@@ -43,7 +42,6 @@
 #include "mlir/Target/LLVMIR/TypeToLLVM.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/TypeSwitch.h"
-#include "llvm/Support/Casting.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/Host.h"
 #include <cstdint>
@@ -804,9 +802,14 @@ private:
           })
           .Case<memref::ExpandShapeOp>([&](memref::ExpandShapeOp op) {
             Value src = findValue(op.getSrc());
+            // getOutputShape() contains only dynamic operands. Reconstruct the
+            // complete mixed shape so static bounds in static_output_shape are
+            // not dropped when the operation is cloned into the vector loop.
             SmallVector<OpFoldResult> remappedOutputShape;
-            remappedOutputShape.reserve(op.getOutputShape().size());
-            for (OpFoldResult ofr : op.getOutputShape()) {
+            SmallVector<OpFoldResult> mixedOutputShape =
+                op.getMixedOutputShape();
+            remappedOutputShape.reserve(mixedOutputShape.size());
+            for (OpFoldResult ofr : mixedOutputShape) {
               if (auto v = dyn_cast<Value>(ofr)) {
                 remappedOutputShape.push_back(findValue(v));
               } else {
