@@ -272,6 +272,54 @@ static Value extractPointerFromMemref(ConversionPatternRewriter &rewriter,
   return ptr;
 }
 
+/// Lower one K1 int8 vmadot{,u,su,us} on memref tiles.
+///
+/// At VLEN=256 the 4x8 int8 A tile and the packed 4x8 int8 B tile each fill
+/// one vector register (e8, m1, 32 elements) and the 4x4 int32 C tile fills
+/// an aligned register pair (e32, m2, 16 elements), so the intrinsic is
+/// nxv4i32 += nxv8i8 * nxv8i8 and every load and store moves exactly one
+/// tile. The tiles must be contiguous.
+static LogicalResult lowerK1Int8Dot(Operation *op, Value vd, Value vs1,
+                                    Value vs2, StringRef intrinsicName,
+                                    ConversionPatternRewriter &rewriter) {
+  Location loc = op->getLoc();
+  auto *ctx = rewriter.getContext();
+  auto module = op->getParentOfType<ModuleOp>();
+  if (!module)
+    return failure();
+  auto i64Type = IntegerType::get(ctx, 64);
+  auto inputVecType =
+      VectorType::get({8}, IntegerType::get(ctx, 8), /*scalableDims=*/true);
+  auto outputVecType =
+      VectorType::get({4}, IntegerType::get(ctx, 32), /*scalableDims=*/true);
+  constexpr int64_t kInputVL = 32;  // 4x8 int8 elements
+  constexpr int64_t kOutputVL = 16; // 4x4 int32 elements
+
+  Value vdPtr = extractPointerFromMemref(rewriter, loc, vd);
+  Value vs1Ptr = extractPointerFromMemref(rewriter, loc, vs1);
+  Value vs2Ptr = extractPointerFromMemref(rewriter, loc, vs2);
+  Value inputVL = LLVM::ConstantOp::create(
+      rewriter, loc, i64Type, rewriter.getI64IntegerAttr(kInputVL));
+  Value outputVL = LLVM::ConstantOp::create(
+      rewriter, loc, i64Type, rewriter.getI64IntegerAttr(kOutputVL));
+
+  Value vs1Vec =
+      createRVVVectorLoad(rewriter, loc, module, vs1Ptr, inputVecType,
+                          "llvm.riscv.vle.nxv8i8", inputVL);
+  Value vs2Vec =
+      createRVVVectorLoad(rewriter, loc, module, vs2Ptr, inputVecType,
+                          "llvm.riscv.vle.nxv8i8", inputVL);
+  Value vdVec = createRVVVectorLoad(rewriter, loc, module, vdPtr, outputVecType,
+                                    "llvm.riscv.vle.nxv4i32", outputVL);
+  Value result =
+      createIMEVmadotIntrinsic(rewriter, loc, module, vdVec, vs1Vec, vs2Vec,
+                               intrinsicName, ".nxv4i32.nxv8i8.nxv8i8");
+  createRVVVectorStore(rewriter, loc, module, result, vdPtr,
+                       "llvm.riscv.vse.nxv4i32", outputVL);
+  rewriter.eraseOp(op);
+  return success();
+}
+
 struct IMEVmadotLowering : public ConvertOpToLLVMPattern<VmadotOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -288,6 +336,9 @@ struct IMEVmadotLowering : public ConvertOpToLLVMPattern<VmadotOp> {
     Type elemType = getMemRefElementType(op.getVs1());
     if (!elemType)
       return failure();
+    if (elemType.isInteger(8))
+      return lowerK1Int8Dot(op, op.getVd(), op.getVs1(), op.getVs2(),
+                            "llvm.riscv.ime.vmadot", rewriter);
 
     IMETypeConfig config = getIMETypeConfig(ctx, elemType);
     auto i64Type = IntegerType::get(ctx, 64);
@@ -345,6 +396,9 @@ struct IMEVmadotuLowering : public ConvertOpToLLVMPattern<VmadotuOp> {
     Type elemType = getMemRefElementType(op.getVs1());
     if (!elemType)
       return failure();
+    if (elemType.isInteger(8))
+      return lowerK1Int8Dot(op, op.getVd(), op.getVs1(), op.getVs2(),
+                            "llvm.riscv.ime.vmadotu", rewriter);
 
     IMETypeConfig config = getIMETypeConfig(ctx, elemType);
     auto i64Type = IntegerType::get(ctx, 64);
@@ -402,6 +456,9 @@ struct IMEVmadotsuLowering : public ConvertOpToLLVMPattern<VmadotsuOp> {
     Type elemType = getMemRefElementType(op.getVs1());
     if (!elemType)
       return failure();
+    if (elemType.isInteger(8))
+      return lowerK1Int8Dot(op, op.getVd(), op.getVs1(), op.getVs2(),
+                            "llvm.riscv.ime.vmadotsu", rewriter);
 
     IMETypeConfig config = getIMETypeConfig(ctx, elemType);
     auto i64Type = IntegerType::get(ctx, 64);
@@ -459,6 +516,9 @@ struct IMEVmadotusLowering : public ConvertOpToLLVMPattern<VmadotusOp> {
     Type elemType = getMemRefElementType(op.getVs1());
     if (!elemType)
       return failure();
+    if (elemType.isInteger(8))
+      return lowerK1Int8Dot(op, op.getVd(), op.getVs1(), op.getVs2(),
+                            "llvm.riscv.ime.vmadotus", rewriter);
 
     IMETypeConfig config = getIMETypeConfig(ctx, elemType);
     auto i64Type = IntegerType::get(ctx, 64);
