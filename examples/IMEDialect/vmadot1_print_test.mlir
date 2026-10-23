@@ -12,7 +12,7 @@
 // RUN:   -reconcile-unrealized-casts | \
 // RUN: buddy-translate -buddy-to-llvmir | \
 // RUN: buddy-llc -filetype=asm -mtriple=riscv64 \
-// RUN:   -mattr=+m,+v,+xsmtime -o - | FileCheck %s --check-prefix=ASM
+// RUN:   -mattr=+m,+v,+xsmtvdot -o - | FileCheck %s --check-prefix=ASM
 // CHECK: func.func @main
 //
 // vmadot1 computes: C[i,j] += sum_k(signed(A[1+i,k]) * signed(B[j,k]))
@@ -109,5 +109,5 @@ func.func @main() -> i32 {
   return %ret : i32
 }
 
-// ASM: .attribute 5, "{{.*xsmtime.*}}"
+// ASM: .attribute 5, "{{.*xsmtvdot.*}}"
 // ASM: vmadot1{{[ \t]}}

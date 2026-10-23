@@ -457,33 +457,4 @@ def IME_Vmadot3su_IntrOp : IME_IntrOpBase<"vmadot3su">,
 def IME_Vmadot3us_IntrOp : IME_IntrOpBase<"vmadot3us">,
   Arguments<(ins LLVM_AnyScalableVector:$vd, LLVM_AnyScalableVector:$vs1, LLVM_AnyScalableVector:$vs2)>;
 
-// slide-n intrinsics (with dynamic slide value in GPR)
-def IME_Vmadotn_IntrOp : IME_IntrOpBase<"vmadotn">,
-  Arguments<(ins LLVM_AnyScalableVector:$vd, LLVM_AnyScalableVector:$vs1, LLVM_AnyScalableVector:$vs2, I64:$slide)>;
-
-def IME_Vmadotnu_IntrOp : IME_IntrOpBase<"vmadotnu">,
-  Arguments<(ins LLVM_AnyScalableVector:$vd, LLVM_AnyScalableVector:$vs1, LLVM_AnyScalableVector:$vs2, I64:$slide)>;
-
-def IME_Vmadotnsu_IntrOp : IME_IntrOpBase<"vmadotnsu">,
-  Arguments<(ins LLVM_AnyScalableVector:$vd, LLVM_AnyScalableVector:$vs1, LLVM_AnyScalableVector:$vs2, I64:$slide)>;
-
-def IME_Vmadotnus_IntrOp : IME_IntrOpBase<"vmadotnus">,
-  Arguments<(ins LLVM_AnyScalableVector:$vd, LLVM_AnyScalableVector:$vs1, LLVM_AnyScalableVector:$vs2, I64:$slide)>;
-
-//===----------------------------------------------------------------------===//
-// Sliding-window Floating-Point Matrix Multiply-Accumulate Intrinsics
-//===----------------------------------------------------------------------===//
-
-def IME_Vfmadot1_IntrOp : IME_IntrOpBase<"vfmadot1">,
-  Arguments<(ins LLVM_AnyScalableVector:$vd, LLVM_AnyScalableVector:$vs1, LLVM_AnyScalableVector:$vs2)>;
-
-def IME_Vfmadot2_IntrOp : IME_IntrOpBase<"vfmadot2">,
-  Arguments<(ins LLVM_AnyScalableVector:$vd, LLVM_AnyScalableVector:$vs1, LLVM_AnyScalableVector:$vs2)>;
-
-def IME_Vfmadot3_IntrOp : IME_IntrOpBase<"vfmadot3">,
-  Arguments<(ins LLVM_AnyScalableVector:$vd, LLVM_AnyScalableVector:$vs1, LLVM_AnyScalableVector:$vs2)>;
-
-def IME_Vfmadotn_IntrOp : IME_IntrOpBase<"vfmadotn">,
-  Arguments<(ins LLVM_AnyScalableVector:$vd, LLVM_AnyScalableVector:$vs1, LLVM_AnyScalableVector:$vs2, I64:$slide)>;
-
 #endif // IME_DIALECT

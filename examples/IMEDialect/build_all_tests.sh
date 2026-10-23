@@ -22,18 +22,18 @@ build_test() {
 
     echo "Building $name..."
 
-    # Generate assembly
+    # Generate the object file
     $BUDDY_OPT $mlir_file $PASSES | \
     $BUDDY_TRANSLATE -buddy-to-llvmir | \
-    $BUDDY_LLC -filetype=asm -mtriple=riscv64 -mattr=+m,+v,+xsmtime -o ${name}.s
+    $BUDDY_LLC -filetype=obj -mtriple=riscv64 -mattr=+m,+v,+xsmtvdot -o ${name}.o
 
     if [ $? -ne 0 ]; then
-        echo "Failed to generate assembly for $name"
+        echo "Failed to generate the object file for $name"
         return 1
     fi
 
     # Compile to executable
-    $SPACEMIT_GCC -march=rv64gcv -static ${name}.s $runtime_file -o ${name}_test
+    $SPACEMIT_GCC -march=rv64gcv -static ${name}.o $runtime_file -o ${name}_test
 
     if [ $? -ne 0 ]; then
         echo "Failed to compile $name"
@@ -56,22 +56,16 @@ build_test "vmadotsu" "vmadotsu_print_test.mlir" "runtime_vmadotsu.c"
 build_test "vmadotus" "vmadotus_print_test.mlir" "runtime_vmadotus.c"
 
 # Build vfmadot (floating-point) - uses different print function
-# build_test "vfmadot" "vfmadot_print_test.mlir" "runtime_vfmadot.c"
 
 # Build vmadotn (signed x signed, dynamic slide)
-build_test "vmadotn" "vmadotn_print_test.mlir" "runtime_vmadotn.c"
 
 # Build vmadotnu (unsigned x unsigned, dynamic slide)
-build_test "vmadotnu" "vmadotnu_print_test.mlir" "runtime_vmadotnu.c"
 
 # Build vmadotnsu (signed x unsigned, dynamic slide)
-build_test "vmadotnsu" "vmadotnsu_print_test.mlir" "runtime_vmadotnsu.c"
 
 # Build vmadotnus (unsigned x signed, dynamic slide)
-build_test "vmadotnus" "vmadotnus_print_test.mlir" "runtime_vmadotnus.c"
 
 # Build vfmadotn (floating-point, dynamic slide) - uses different print function
-# build_test "vfmadotn" "vfmadotn_print_test.mlir" "runtime_vfmadotn.c"
 
 echo ""
 echo "All builds complete. Executables:"

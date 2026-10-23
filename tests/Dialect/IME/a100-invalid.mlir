@@ -9,7 +9,7 @@ llvm.func @wrong_accumulator(%c: vector<[8]xi32>, %a: vector<[8]xi8>) {
 // -----
 
 llvm.func @wrong_a100_inputs(%c: vector<[4]xi32>, %a: vector<[16]xi8>) {
-  // expected-error @+1 {{invalid A100 dot tile types}}
+  // expected-error @+1 {{invalid dot tile types}}
   %r = "ime.intr.vmadot"(%c, %a, %a) : (vector<[4]xi32>, vector<[16]xi8>, vector<[16]xi8>) -> vector<[4]xi32>
   llvm.return
 }

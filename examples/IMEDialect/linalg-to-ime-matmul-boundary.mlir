@@ -14,7 +14,7 @@
 // RUN:   -reconcile-unrealized-casts | \
 // RUN: buddy-translate -buddy-to-llvmir | \
 // RUN: buddy-llc -filetype=asm -mtriple=riscv64 \
-// RUN:   -mattr=+m,+v,+xsmtime -o - | FileCheck %s --check-prefix=ASM
+// RUN:   -mattr=+m,+v,+xsmtvdot -o - | FileCheck %s --check-prefix=ASM
 //
 // This file tests the lowering of linalg.matmul to ime.vmadot operations
 // with boundary handling for non-aligned dimensions.
@@ -104,20 +104,6 @@ func.func @matmul_i8_small_all_scalar(%A: memref<3x5xi8>, %B: memref<5x2xi8>,
 }
 
 // =============================================================================
-// Test case 7: int16 with boundary (tile size is 4x4x4 for int16)
-// =============================================================================
-// CHECK-LABEL: func.func @matmul_i16_boundary
-// CHECK: scf.for
-// CHECK:   scf.for
-// CHECK:     ime.vmadot
-func.func @matmul_i16_boundary(%A: memref<6x7xi16>, %B: memref<7x5xi16>,
-                                %C: memref<6x5xi32>) {
-  linalg.matmul ins(%A, %B : memref<6x7xi16>, memref<7x5xi16>)
-                outs(%C : memref<6x5xi32>)
-  return
-}
-
-// =============================================================================
 // Test case 8: Edge case - exactly one tile with boundary
 // =============================================================================
 // CHECK-LABEL: func.func @matmul_i8_one_tile_plus
@@ -131,5 +117,5 @@ func.func @matmul_i8_one_tile_plus(%A: memref<5x8xi8>, %B: memref<8x4xi8>,
   return
 }
 
-// ASM: .attribute 5, "{{.*xsmtime.*}}"
+// ASM: .attribute 5, "{{.*xsmtvdot.*}}"
 // ASM: vmadot{{[ \t]}}

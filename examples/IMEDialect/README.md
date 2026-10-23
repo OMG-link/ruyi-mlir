@@ -3,7 +3,10 @@
 This document provides a comprehensive guide for using the IME (Integrated Matrix Extension) dialect in buddy-mlir.
 
 For K3 / SpacemiT A100, see [the A100 SSA interface and hardware tests](A100.md).
-The legacy tile sizes and `+xsmtime` commands below describe the K1 path.
+The commands below describe the K1 (generic) path, which emits the XSMTVDot
+instructions (`smt.vmadot*`, `-mattr=+xsmtvdot`). The K1 has int8 dots and
+fixed sliding windows only; `vfmadot*`, `vmadotn*` and int16 inputs are rejected
+by `-lower-ime` on this target.
 
 ## Table of Contents
 
@@ -17,10 +20,8 @@ The legacy tile sizes and `+xsmtime` commands below describe the K1 path.
 The IMEDialect example folder contains the following key files:
 
 **MLIR Source Files:**
-- **`vmadot.mlir`, `vmadotu.mlir`, `vmadotsu.mlir`, `vmadotus.mlir`, `vfmadot.mlir`**: Minimal MLIR files demonstrating each basic IME operation. Use these to verify assembly code generation.
+- **`vmadot.mlir`, `vmadotu.mlir`, `vmadotsu.mlir`, `vmadotus.mlir`**: Minimal MLIR files demonstrating each basic IME operation. Use these to verify assembly code generation.
 - **`vmadot1.mlir`, `vmadot2.mlir`, `vmadot3.mlir`**: Fixed sliding-window integer operations with slide=1, 2, 3.
-- **`vfmadot1.mlir`, `vfmadot2.mlir`, `vfmadot3.mlir`**: Fixed sliding-window floating-point operations with slide=1, 2, 3.
-- **`vmadotn.mlir`, `vmadotnu.mlir`, `vmadotnsu.mlir`, `vmadotnus.mlir`, `vfmadotn.mlir`**: Minimal MLIR files for dynamic sliding-window operations with runtime slide parameter.
 - **`vmadot_print_test.mlir`, `vmadotu_print_test.mlir`, etc.**: Extended test MLIR files with additional code for printing input/output matrices on hardware. Use these for hardware validation with visible results.
 
 **Runtime and Build Files:**
@@ -53,9 +54,6 @@ IME operates on fixed tile sizes determined by VLEN (Vector Register Length):
 | VLEN | Data Type | M | K | N | Description |
 |------|-----------|---|---|---|-------------|
 | 256 | int8 | 4 | 8 | 4 | 4×8 × 8×4 → 4×4 |
-| 256 | fp16 | 4 | 4 | 4 | 4×4 × 4×4 → 4×4 |
-| 128 | int8 | 4 | 4 | 4 | 4×4 × 4×4 → 4×4 |
-| 128 | fp16 | 4 | 2 | 4 | 4×2 × 2×4 → 4×4 |
 
 
 ## Quick Start
@@ -92,10 +90,6 @@ Use this option to verify that IME operations are correctly lowered to RISC-V as
 ```bash
 make vmadot-lower      # Basic integer operations
 make vmadot1-lower     # Fixed sliding-window (slide=1)
-make vmadotn-lower     # Dynamic sliding-window
-make vfmadot-lower     # Floating-point
-make vfmadot1-lower    # Floating-point fixed sliding-window
-make vfmadotn-lower    # Floating-point dynamic sliding-window
 ```
 This generates `log.mlir` containing the lowered representation.
 
@@ -103,7 +97,6 @@ This generates `log.mlir` containing the lowered representation.
 ```bash
 make vmadot-translate
 make vmadot1-translate
-make vmadotn-translate
 # ... and similarly for other variants
 ```
 This generates `log.ll` containing LLVM IR code.
@@ -112,10 +105,6 @@ This generates `log.ll` containing LLVM IR code.
 ```bash
 make vmadot-asm        # Basic: vmadot, vmadotu, vmadotsu, vmadotus
 make vmadot1-asm       # Fixed slide: vmadot1, vmadot2, vmadot3
-make vmadotn-asm       # Dynamic slide: vmadotn, vmadotnu, vmadotnsu, vmadotnus
-make vfmadot-asm       # Float basic
-make vfmadot1-asm      # Float fixed slide: vfmadot1, vfmadot2, vfmadot3
-make vfmadotn-asm      # Float dynamic slide
 ```
 This generates `log.s` containing RISC-V assembly. You can inspect this file to verify correct IME instruction generation.
 
@@ -128,10 +117,6 @@ This generates `log.s` containing RISC-V assembly. You can inspect this file to 
 | Fixed Slide Integer (unsigned) | vmadot1u, vmadot2u, vmadot3u | `vmadot{1,2,3}u-{lower,translate,asm}` |
 | Fixed Slide Integer (signed×unsigned) | vmadot1su, vmadot2su, vmadot3su | `vmadot{1,2,3}su-{lower,translate,asm}` |
 | Fixed Slide Integer (unsigned×signed) | vmadot1us, vmadot2us, vmadot3us | `vmadot{1,2,3}us-{lower,translate,asm}` |
-| Dynamic Slide Integer | vmadotn, vmadotnu, vmadotnsu, vmadotnus | `vmadotn{,u,su,us}-{lower,translate,asm}` |
-| Basic Float | vfmadot | `vfmadot-{lower,translate,asm,run}` |
-| Fixed Slide Float | vfmadot1, vfmadot2, vfmadot3 | `vfmadot{1,2,3}-{lower,translate,asm,run}` |
-| Dynamic Slide Float | vfmadotn | `vfmadotn-{lower,translate,asm,run}` |
 
 #### Option B: Build Hardware Test Executables (Full Test)
 
@@ -155,12 +140,8 @@ This will generate executable binaries: `vmadot_test`, `vmadotu_test`, `vmadotsu
 
 > **Note**: The `-run` targets require the SpacemiT cross-compiler (`riscv64-unknown-linux-gnu-gcc`) to be in your PATH.
 
-> **Toolchain Compatibility Note**: The SpacemiT toolchain (v1.1.2) currently only supports basic IME instructions (`vmadot`, `vmadotu`, `vmadotsu`, `vmadotus`). The following instructions will produce "unrecognized opcode" errors when assembled with SpacemiT's GNU as:
-> - Fixed sliding-window: `vmadot1`, `vmadot2`, `vmadot3`, `vfmadot1`, `vfmadot2`, `vfmadot3`
-> - Dynamic sliding-window: `vmadotn`, `vmadotnu`, `vmadotnsu`, `vmadotnus`, `vfmadotn`
-> - Floating-point basic: `vfmadot`
->
-> For these unsupported instructions, you can still verify assembly generation using the `-asm` targets, but hardware testing requires SpacemiT to update their toolchain.
+> The `-run` targets emit object files with `buddy-llc`, so the GNU assembler
+> does not need to know the `smt.vmadot*` mnemonics.
 
 ---
 
@@ -198,15 +179,9 @@ Each test will output:
 
 | Instruction | Assembly Gen | Hardware Test | Notes |
 |-------------|-------------|---------------|-------|
-| vmadot | ✅ | ✅ | Fully working |
-| vmadotu | ✅ | ✅ | Fully working |
-| vmadotsu | ✅ | ✅ | Fully working |
-| vmadotus | ✅ | ✅ | Fully working |
-| vmadot1/2/3 | ✅ | ⏳ | Waiting for funct7 fix |
-| vmadotn/nu/nsu/nus | ✅ | ⏳ | Waiting for toolchain support |
-| vfmadot | ✅ | ⏳ | Waiting for toolchain support |
-| vfmadot1/2/3 | ✅ | ⏳ | Waiting for toolchain support |
-| vfmadotn | ✅ | ⏳ | Waiting for toolchain support |
+| vmadot, vmadotu, vmadotsu, vmadotus | ✅ | ✅ | Randomized against a C reference on the K1 |
+| vmadot1/2/3 (all four signednesses) | ✅ | ✅ | Randomized against a C reference on the K1 |
+| vmadotn*, vfmadot* | ❌ | ❌ | No such instruction on the K1 (SIGILL); rejected by `-lower-ime` |
 
 
 

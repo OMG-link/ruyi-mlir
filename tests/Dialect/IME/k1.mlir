@@ -10,12 +10,11 @@
 // RUN:   | FileCheck %s --check-prefix=ASM
 //
 // K1 int8 vmadot on memref tiles: each 4x8 int8 operand is one e8/m1
-// register (32 elements) and the 4x4 int32 accumulator one e32/m2 register
-// pair (16 elements), so every load and store moves exactly one tile.
+// register (32 elements), the sliding-window A operand an e8/m2 register
+// pair (64 elements), and the 4x4 int32 accumulator one e32/m2 register pair
+// (16 elements), so every load and store moves exactly one tile.
 
 // MLIR-LABEL: llvm.func @k1_vmadot
-// MLIR-DAG: llvm.mlir.constant(32 : i64)
-// MLIR-DAG: llvm.mlir.constant(16 : i64)
 // MLIR: llvm.call @llvm.riscv.vle.nxv8i8.p0.i64
 // MLIR: llvm.call @llvm.riscv.vle.nxv8i8.p0.i64
 // MLIR: llvm.call @llvm.riscv.vle.nxv4i32.p0.i64
@@ -60,5 +59,28 @@ func.func @k1_vmadotsu(%c: memref<4x4xi32>, %a: memref<4x8xi8>, %b: memref<4x8xu
 // ASM: smt.vmadotus
 func.func @k1_vmadotus(%c: memref<4x4xi32>, %a: memref<4x8xui8>, %b: memref<4x8xi8>) {
   ime.vmadotus %c, %a, %b : memref<4x4xi32>, memref<4x8xui8>, memref<4x8xi8>
+  return
+}
+
+// Sliding window: A is the 8x8 pair.
+// MLIR-LABEL: llvm.func @k1_vmadot2
+// MLIR: llvm.call @llvm.riscv.vle.nxv16i8.p0.i64
+// MLIR: llvm.call @llvm.riscv.vle.nxv8i8.p0.i64
+// MLIR: llvm.call @llvm.riscv.ime.vmadot2.nxv4i32.nxv16i8.nxv8i8
+// ASM-LABEL: k1_vmadot2:
+// ASM-DAG: vsetvli zero, {{a[0-9]+}}, e8, m2
+// ASM-DAG: vle8.v [[A:v[0-9]+]], (a1)
+// ASM: smt.vmadot2 {{v[0-9]+}}, [[A]], {{v[0-9]+}}
+func.func @k1_vmadot2(%c: memref<4x4xi32>, %a: memref<8x8xi8>, %b: memref<4x8xi8>) {
+  ime.vmadot2 %c, %a, %b : memref<4x4xi32>, memref<8x8xi8>, memref<4x8xi8>
+  return
+}
+
+// MLIR-LABEL: llvm.func @k1_vmadot3us
+// MLIR: llvm.call @llvm.riscv.ime.vmadot3us.nxv4i32.nxv16i8.nxv8i8
+// ASM-LABEL: k1_vmadot3us:
+// ASM: smt.vmadot3us
+func.func @k1_vmadot3us(%c: memref<4x4xi32>, %a: memref<8x8xui8>, %b: memref<4x8xi8>) {
+  ime.vmadot3us %c, %a, %b : memref<4x4xi32>, memref<8x8xui8>, memref<4x8xi8>
   return
 }

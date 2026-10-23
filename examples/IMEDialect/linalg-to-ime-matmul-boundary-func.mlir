@@ -14,7 +14,7 @@
 // RUN:   -reconcile-unrealized-casts | \
 // RUN: buddy-translate -buddy-to-llvmir | \
 // RUN: buddy-llc -filetype=asm -mtriple=riscv64 \
-// RUN:   -mattr=+m,+v,+xsmtime -o - | FileCheck %s --check-prefix=ASM
+// RUN:   -mattr=+m,+v,+xsmtvdot -o - | FileCheck %s --check-prefix=ASM
 //
 // Test case: C[7x5] = A[7x10] * B[10x5] with non-aligned dimensions
 // For int8: TILE_M=4, TILE_K=8, TILE_N=4
@@ -31,5 +31,5 @@ func.func @matmul_boundary(%A: memref<7x10xi8>, %B: memref<10x5xi8>,
   return
 }
 
-// ASM: .attribute 5, "{{.*xsmtime.*}}"
+// ASM: .attribute 5, "{{.*xsmtvdot.*}}"
 // ASM: vmadot{{[ \t]}}

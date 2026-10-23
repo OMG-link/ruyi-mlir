@@ -12,7 +12,7 @@
 // RUN:   -reconcile-unrealized-casts | \
 // RUN: buddy-translate -buddy-to-llvmir | \
 // RUN: buddy-llc -filetype=asm -mtriple=riscv64 \
-// RUN:   -mattr=+m,+v,+xsmtime -o - | FileCheck %s --check-prefix=ASM
+// RUN:   -mattr=+m,+v,+xsmtvdot -o - | FileCheck %s --check-prefix=ASM
 
 // This example demonstrates the IME vmadot3 operation (slide=3).
 // vmadot3 performs: C += slide(A, 3) × B where A, B are signed int8 matrices.
@@ -66,5 +66,5 @@ func.func @main() -> i32 {
   return %ret : i32
 }
 
-// ASM: .attribute 5, "{{.*xsmtime.*}}"
+// ASM: .attribute 5, "{{.*xsmtvdot.*}}"
 // ASM: vmadot3{{[ \t]}}

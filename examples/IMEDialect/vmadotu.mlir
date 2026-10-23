@@ -12,7 +12,7 @@
 // RUN:   -reconcile-unrealized-casts | \
 // RUN: buddy-translate -buddy-to-llvmir | \
 // RUN: buddy-llc -filetype=asm -mtriple=riscv64 \
-// RUN:   -mattr=+m,+v,+xsmtime -o - | FileCheck %s --check-prefix=ASM
+// RUN:   -mattr=+m,+v,+xsmtvdot -o - | FileCheck %s --check-prefix=ASM
 
 // This example demonstrates the vmadotu operation for unsigned integer matrix multiplication.
 // vmadotu performs: C += A × B where A, B are unsigned int8 matrices and C is int32 accumulator.
@@ -61,5 +61,5 @@ func.func @main() -> i32 {
   return %ret : i32
 }
 
-// ASM: .attribute 5, "{{.*xsmtime.*}}"
+// ASM: .attribute 5, "{{.*xsmtvdot.*}}"
 // ASM: vmadotu{{[ \t]}}
