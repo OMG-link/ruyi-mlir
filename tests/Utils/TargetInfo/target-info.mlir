@@ -80,6 +80,62 @@ module attributes {llvm.target = #llvm.target<triple = "riscv64-unknown-linux-gn
 
 // -----
 
-// expected-error @below {{target triple 'x86_64-unknown-linux-gnu' is not RISC-V}}
-module attributes {llvm.target = #llvm.target<triple = "x86_64-unknown-linux-gnu", chip = "native">} {
+
+// An x86 chip: AVX-512 gives 512-bit registers, and a group spans 8 of them.
+// CHECK-LABEL: triple: x86_64-unknown-linux-gnu
+// CHECK-NEXT: chip: icelake-server
+// CHECK-NEXT: vector: yes
+// CHECK-NEXT: vector-bits: 512
+// CHECK-NEXT: features: {{.*}}avx512f
+// CHECK-NEXT: elements i8: m1=64 m8=512
+// CHECK-NEXT: elements i32: m1=16 m8=128
+// CHECK-NEXT: elements i64: m1=8 m8=64
+// CHECK-NEXT: elements f16: m1=0 m8=0
+// CHECK-NEXT: elements f32: m1=16 m8=128
+// CHECK-NEXT: elements bf16: m1=0 m8=0
+module attributes {llvm.target = #llvm.target<triple = "x86_64-unknown-linux-gnu", chip = "icelake-server">} {
+}
+
+// -----
+
+// Removing a feature also removes the features that depend on it.
+// CHECK: chip: icelake-server
+// CHECK: vector-bits: 256
+// CHECK-NOT: avx512
+// CHECK: elements i8: m1=32 m8=256
+module attributes {llvm.target = #llvm.target<triple = "x86_64-unknown-linux-gnu", chip = "icelake-server", features = #llvm.target_features<["-avx512f"]>>} {
+}
+
+// -----
+
+// "generic" is the triple's baseline, SSE2 for x86-64.
+// CHECK-LABEL: chip: generic
+// CHECK: vector-bits: 128
+module attributes {llvm.target = #llvm.target<triple = "x86_64-unknown-linux-gnu", chip = "generic">} {
+}
+
+// -----
+
+// An added feature brings the features it implies.
+// CHECK-LABEL: chip: generic
+// CHECK: vector-bits: 256
+module attributes {llvm.target = #llvm.target<triple = "x86_64-unknown-linux-gnu", chip = "generic", features = #llvm.target_features<["+avx2"]>>} {
+}
+
+// -----
+
+// expected-error @below {{unknown x86 processor 'no-such-core'}}
+module attributes {llvm.target = #llvm.target<triple = "x86_64-unknown-linux-gnu", chip = "no-such-core">} {
+}
+
+// -----
+
+// expected-error @below {{unknown x86 feature 'nosuchfeature'}}
+module attributes {llvm.target = #llvm.target<triple = "x86_64-unknown-linux-gnu", chip = "generic", features = #llvm.target_features<["+nosuchfeature"]>>} {
+}
+
+// -----
+
+// expected-error @below {{target triple 'aarch64-unknown-linux-gnu' is neither RISC-V nor x86}}
+module attributes {llvm.target = #llvm.target<triple = "aarch64-unknown-linux-gnu", chip = "generic">} {
 }

@@ -76,6 +76,7 @@ target_link_libraries(buddy-opt
   TosaElementwiseFusion
   AssumeTightMemRefLayoutPass
   BuddyTargetInfo
+  ConvertTileTensorToVectorPass
   StaticizeMemRefLayoutPass
   EliminateMemRefCopyPass
   EliminateLargeZeroConstants
