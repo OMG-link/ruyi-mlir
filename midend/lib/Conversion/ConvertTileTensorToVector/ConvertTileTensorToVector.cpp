@@ -29,6 +29,13 @@
 // component never introduces a vector<->tensor conversion, so a component is
 // converted entirely or not at all.
 //
+// With `ime-tile-dot`, on the SpacemiT K1 (XSMTVDot, VLEN = 256), a
+// `linalg.matmul(A, linalg.transpose(B))` on 4x8 int8 tiles into a 4x4 int32
+// tile is one vmadot: it becomes `ime.tile.vmadot(u)` on the flat vectors,
+// the transpose is absorbed when only such dots read it, and a dot from a
+// zero accumulator that is then added to a tile accumulates into that tile.
+// The option is set by pipelines that run `-lower-ime`.
+//
 // Values that carry no data dependence — `tensor.empty`, dense
 // `arith.constant`, the `outs` of `linalg.fill` and the unused `outs` of a
 // `linalg.generic` — do not join components; a converted user materializes
@@ -52,9 +59,12 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/IR/Remarks.h"
 #include "mlir/Pass/Pass.h"
 
+#include "Dialect/IME/IMEDialect.h"
+#include "Dialect/IME/IMEOps.h"
 #include "Utils/TargetInfo.h"
 
 #include "llvm/ADT/DenseMap.h"
@@ -147,11 +157,73 @@ bool isElementwiseGeneric(linalg::GenericOp generic, std::string &reason) {
   return true;
 }
 
+/// `linalg.matmul(A, linalg.transpose(B))` on the register tiles of one K1
+/// IME dot: A and B are 4x8 int8 (B stored as N x K), C is 4x4 int32.
+struct TileDot {
+  Value lhs, rhs, acc;
+  bool isUnsigned;
+};
+
+/// True when the target executes one tile dot as a single `vmadot`: the K1's
+/// XSMTVDot at VLEN = 256, where a 4x8 int8 tile is one register.
+bool hasK1TileDot(const mlir::buddy::TargetInfo &target) {
+  return target.getArch() == mlir::buddy::TargetInfo::Arch::RISCV &&
+         target.hasExtension("xsmtvdot") &&
+         target.getVectorRegisterBits() == 256;
+}
+
+bool isTileType(Value v, ArrayRef<int64_t> shape, unsigned width) {
+  auto ty = dyn_cast<RankedTensorType>(v.getType());
+  return ty && ty.getShape() == shape && ty.getElementType().isInteger(width);
+}
+
+std::optional<TileDot> matchTileDot(linalg::MatmulOp matmul) {
+  if (!matmul.hasPureTensorSemantics() || matmul.hasUserDefinedMaps())
+    return std::nullopt;
+  Value lhs = matmul.getDpsInputs()[0];
+  auto transpose =
+      matmul.getDpsInputs()[1].getDefiningOp<linalg::TransposeOp>();
+  Value acc = matmul.getDpsInits()[0];
+  if (!transpose || !transpose.hasPureTensorSemantics() ||
+      transpose.getPermutation() != ArrayRef<int64_t>{1, 0})
+    return std::nullopt;
+  Value rhs = transpose.getInput();
+  if (!isTileType(lhs, {4, 8}, 8) || !isTileType(rhs, {4, 8}, 8) ||
+      !isTileType(acc, {4, 4}, 32))
+    return std::nullopt;
+  return TileDot{lhs, rhs, acc,
+                 matmul.getCast() == linalg::TypeFn::cast_unsigned};
+}
+
+/// A transpose consumed only as the B operand of tile dots needs no op of its
+/// own: the dot reads B in N x K order.
+bool isAbsorbedTranspose(linalg::TransposeOp transpose,
+                         const mlir::buddy::TargetInfo &target) {
+  if (!hasK1TileDot(target) || transpose->use_empty())
+    return false;
+  for (OpOperand &use : transpose->getResult(0).getUses()) {
+    auto matmul = dyn_cast<linalg::MatmulOp>(use.getOwner());
+    if (!matmul || use.getOperandNumber() != 1 || !matchTileDot(matmul))
+      return false;
+  }
+  return true;
+}
+
 class ConvertTileTensorToVectorPass
     : public PassWrapper<ConvertTileTensorToVectorPass,
                          OperationPass<func::FuncOp>> {
 public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ConvertTileTensorToVectorPass)
+
+  ConvertTileTensorToVectorPass() = default;
+  ConvertTileTensorToVectorPass(const ConvertTileTensorToVectorPass &other)
+      : PassWrapper(other) {}
+
+  Option<bool> imeTileDot{
+      *this, "ime-tile-dot",
+      llvm::cl::desc("Rewrite K1-sized matmul(A, transpose(B)) into "
+                     "ime.tile dots; needs -lower-ime later in the pipeline"),
+      llvm::cl::init(false)};
   StringRef getArgument() const final {
     return "convert-tile-tensor-to-vector";
   }
@@ -160,7 +232,8 @@ public:
   }
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<arith::ArithDialect, memref::MemRefDialect,
-                    vector::VectorDialect, tensor::TensorDialect>();
+                    vector::VectorDialect, tensor::TensorDialect,
+                    ::buddy::ime::IMEDialect>();
   }
 
   void runOnOperation() override;
@@ -220,8 +293,8 @@ private:
   }
 
   // ---- Analysis ----------------------------------------------------------
-  void analyze(func::FuncOp func, const buddy::TargetInfo &target);
-  bool isLegalType(Type t, const buddy::TargetInfo &target,
+  void analyze(func::FuncOp func, const mlir::buddy::TargetInfo &target);
+  bool isLegalType(Type t, const mlir::buddy::TargetInfo &target,
                    std::string &reason);
 
   // ---- Rewrite -----------------------------------------------------------
@@ -234,14 +307,14 @@ private:
   }
   Value lookup(OpBuilder &b, Value v);
   void rewrite(func::FuncOp func);
+  void foldDotAccumulation(func::FuncOp func);
   void rewriteOp(OpBuilder &b, Operation *op);
   Value loadTile(OpBuilder &b, Location loc, Value memref, VectorType vecTy);
   void storeTile(OpBuilder &b, Location loc, Value vec, Value memref);
 };
 
-bool ConvertTileTensorToVectorPass::isLegalType(Type t,
-                                                const buddy::TargetInfo &target,
-                                                std::string &reason) {
+bool ConvertTileTensorToVectorPass::isLegalType(
+    Type t, const mlir::buddy::TargetInfo &target, std::string &reason) {
   auto ty = dyn_cast<RankedTensorType>(t);
   if (!ty || !ty.hasStaticShape()) {
     reason = "tensor shape is not static";
@@ -262,8 +335,8 @@ bool ConvertTileTensorToVectorPass::isLegalType(Type t,
   return true;
 }
 
-void ConvertTileTensorToVectorPass::analyze(func::FuncOp func,
-                                            const buddy::TargetInfo &target) {
+void ConvertTileTensorToVectorPass::analyze(
+    func::FuncOp func, const mlir::buddy::TargetInfo &target) {
   auto blockAll = [&](Operation *op, StringRef reason) {
     for (Value v : op->getOperands())
       if (isTensor(v) && !isSourceValue(v))
@@ -301,6 +374,16 @@ void ConvertTileTensorToVectorPass::analyze(func::FuncOp func,
         block(src, op->getLoc(),
               "store target is not row-major with unit innermost stride");
       return;
+    } else if (auto matmul = dyn_cast<linalg::MatmulOp>(op)) {
+      if (imeTileDot && hasK1TileDot(target)) {
+        if (std::optional<TileDot> dot = matchTileDot(matmul)) {
+          uniteAll({dot->lhs, dot->rhs, dot->acc, matmul.getResult(0)});
+          return;
+        }
+      }
+    } else if (auto transpose = dyn_cast<linalg::TransposeOp>(op)) {
+      if (imeTileDot && isAbsorbedTranspose(transpose, target))
+        return;
     } else if (auto generic = dyn_cast<linalg::GenericOp>(op)) {
       std::string reason;
       if (isElementwiseGeneric(generic, reason)) {
@@ -502,6 +585,34 @@ void ConvertTileTensorToVectorPass::rewriteOp(OpBuilder &b, Operation *op) {
     toErase.push_back(op);
     return;
   }
+  if (auto matmul = dyn_cast<linalg::MatmulOp>(op)) {
+    if (!matmul.hasPureTensorSemantics() || !isConverted(matmul.getResult(0)))
+      return;
+    // Only matched tile dots join a component, so this matches.
+    TileDot dot = *matchTileDot(matmul);
+    Value acc = lookup(b, dot.acc), lhs = lookup(b, dot.lhs),
+          rhs = lookup(b, dot.rhs);
+    Value res = dot.isUnsigned
+                    ? ::buddy::ime::TileVmadotuOp::create(b, loc, acc, lhs, rhs)
+                          .getResult()
+                    : ::buddy::ime::TileVmadotOp::create(b, loc, acc, lhs, rhs)
+                          .getResult();
+    mapping.map(matmul.getResult(0), res);
+    toErase.push_back(op);
+    return;
+  }
+  if (auto transpose = dyn_cast<linalg::TransposeOp>(op)) {
+    // An absorbed transpose dies with the dots that read it; it is listed
+    // before them, so it is erased after them.
+    auto users = transpose->getResult(0).getUsers();
+    if (transpose.hasPureTensorSemantics() && !transpose->use_empty() &&
+        llvm::all_of(users, [&](Operation *user) {
+          auto matmul = dyn_cast<linalg::MatmulOp>(user);
+          return matmul && isConverted(matmul.getResult(0));
+        }))
+      toErase.push_back(op);
+    return;
+  }
   if (auto generic = dyn_cast<linalg::GenericOp>(op)) {
     if (generic.getNumResults() == 0 || !isConverted(generic.getResult(0)))
       return;
@@ -587,6 +698,46 @@ void ConvertTileTensorToVectorPass::rewriteOp(OpBuilder &b, Operation *op) {
   }
 }
 
+/// True when `v` is an all-zero vector: a zero splat constant or a broadcast
+/// of a zero scalar.
+bool isZeroVector(Value v) {
+  if (matchPattern(v, m_Zero()))
+    return true;
+  auto bc = v.getDefiningOp<vector::BroadcastOp>();
+  return bc && matchPattern(bc.getSource(), m_Zero());
+}
+
+/// `x + dot(0, a, b)` is `dot(x, a, b)`: the dot accumulates into x directly,
+/// as the instruction does, instead of into a zeroed register then added.
+template <typename DotOp> void foldOne(DotOp dot) {
+  if (!isZeroVector(dot.getAcc()) || !dot->hasOneUse())
+    return;
+  auto add = dyn_cast<arith::AddIOp>(*dot->user_begin());
+  if (!add)
+    return;
+  Value other = add.getLhs() == dot.getResult() ? add.getRhs() : add.getLhs();
+  OpBuilder b(add);
+  auto fused =
+      DotOp::create(b, dot.getLoc(), other, dot.getLhs(), dot.getRhs());
+  add.replaceAllUsesWith(fused.getResult());
+  add.erase();
+  dot.erase();
+}
+
+void ConvertTileTensorToVectorPass::foldDotAccumulation(func::FuncOp func) {
+  SmallVector<Operation *> dots;
+  func.walk([&](Operation *op) {
+    if (isa<::buddy::ime::TileVmadotOp, ::buddy::ime::TileVmadotuOp>(op))
+      dots.push_back(op);
+  });
+  for (Operation *op : dots) {
+    if (auto dot = dyn_cast<::buddy::ime::TileVmadotOp>(op))
+      foldOne(dot);
+    else
+      foldOne(cast<::buddy::ime::TileVmadotuOp>(op));
+  }
+}
+
 void ConvertTileTensorToVectorPass::rewrite(func::FuncOp func) {
   SmallVector<Operation *> ops;
   func.walk<WalkOrder::PreOrder>([&](Operation *op) {
@@ -619,11 +770,12 @@ void ConvertTileTensorToVectorPass::rewrite(func::FuncOp func) {
     if (isSource(op) && op->use_empty())
       op->erase();
   });
+  foldDotAccumulation(func);
 }
 
 void ConvertTileTensorToVectorPass::runOnOperation() {
   func::FuncOp func = getOperation();
-  FailureOr<buddy::TargetInfo> target = buddy::getTargetInfo(func);
+  FailureOr<mlir::buddy::TargetInfo> target = mlir::buddy::getTargetInfo(func);
   if (failed(target))
     return signalPassFailure();
   if (!target->hasVector()) {

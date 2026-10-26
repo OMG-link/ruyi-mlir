@@ -326,6 +326,32 @@ def VfmadotnOp : IME_Op<"vfmadotn"> {
 }
 
 //===----------------------------------------------------------------------===//
+// IME tile operation definitions
+//===----------------------------------------------------------------------===//
+
+// Value-level dots on the register tiles of the SpacemiT K1 (VLEN = 256).
+// Unlike the memref ops above they read and produce SSA vectors, so tiles
+// that already live in registers are not stored and reloaded around each dot.
+// Tiles are flat row-major vectors: `lhs` is A (4x8 int8), `rhs` is B stored
+// as N x K (4x8 int8), and `acc` and the result are C (4x4 int32):
+//
+//   result[i*4 + j] = acc[i*4 + j] + sum_k lhs[i*8 + k] * rhs[j*8 + k]
+class IME_TileDotOp<string mnemonic, string signedness> :
+    IME_Op<"tile." # mnemonic, [Pure, AllTypesMatch<["acc", "result"]>]> {
+  let summary = "K1 int8 tile dot, " # signedness;
+  let arguments = (ins
+    VectorOfLengthAndType<[16], [I32]>:$acc,
+    VectorOfLengthAndType<[32], [I8]>:$lhs,
+    VectorOfLengthAndType<[32], [I8]>:$rhs
+  );
+  let results = (outs VectorOfLengthAndType<[16], [I32]>:$result);
+  let assemblyFormat = "$acc `,` $lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `into` type($result)";
+}
+
+def TileVmadotOp : IME_TileDotOp<"vmadot", "signed x signed">;
+def TileVmadotuOp : IME_TileDotOp<"vmadotu", "unsigned x unsigned">;
+
+//===----------------------------------------------------------------------===//
 // IME Intrinsic operation definitions
 //===----------------------------------------------------------------------===//
 // SSA vectors model values, never physical registers. The LLVM backend chooses

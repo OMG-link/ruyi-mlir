@@ -184,6 +184,39 @@ struct K1DotLowering : public ConvertOpToLLVMPattern<OpTy> {
   }
 };
 
+/// A value-level tile dot. Each fixed 1-D tile is exactly one register (the
+/// accumulator one register pair) at VLEN = 256, so it is placed in the low
+/// part of the scalable register type, the intrinsic runs, and the
+/// accumulator is read back. At this VLEN the insert and extract are
+/// register-identical and LLVM folds them away.
+template <typename OpTy, typename IntrOpTy>
+struct K1TileDotLowering : public ConvertOpToLLVMPattern<OpTy> {
+  using ConvertOpToLLVMPattern<OpTy>::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+    auto i8 = IntegerType::get(ctx, 8);
+    auto tileType = VectorType::get({8}, i8, /*scalableDims=*/true);
+    auto accType =
+        VectorType::get({4}, IntegerType::get(ctx, 32), /*scalableDims=*/true);
+    auto toScalable = [&](Value fixed, VectorType type) -> Value {
+      Value undef = LLVM::UndefOp::create(rewriter, loc, type);
+      return LLVM::vector_insert::create(rewriter, loc, undef, fixed,
+                                         rewriter.getI64IntegerAttr(0));
+    };
+    Value acc = toScalable(adaptor.getAcc(), accType);
+    Value lhs = toScalable(adaptor.getLhs(), tileType);
+    Value rhs = toScalable(adaptor.getRhs(), tileType);
+    Value dot = IntrOpTy::create(rewriter, loc, accType, acc, lhs, rhs);
+    rewriter.replaceOpWithNewOp<LLVM::vector_extract>(
+        op, op.getResult().getType(), dot, rewriter.getI64IntegerAttr(0));
+    return success();
+  }
+};
+
 /// An op the K1 has no instruction for.
 template <typename OpTy>
 struct K1UnsupportedLowering : public ConvertOpToLLVMPattern<OpTy> {
@@ -232,6 +265,8 @@ void addK1Patterns(LLVMTypeConverter &converter, RewritePatternSet &patterns) {
       K1DotLowering<Vmadot3uOp, kVmadot3u, true>,
       K1DotLowering<Vmadot3suOp, kVmadot3su, true>,
       K1DotLowering<Vmadot3usOp, kVmadot3us, true>,
+      K1TileDotLowering<TileVmadotOp, Vmadot_IntrOp>,
+      K1TileDotLowering<TileVmadotuOp, Vmadotu_IntrOp>,
       K1UnsupportedLowering<VfmadotOp>, K1UnsupportedLowering<Vfmadot1Op>,
       K1UnsupportedLowering<Vfmadot2Op>, K1UnsupportedLowering<Vfmadot3Op>,
       K1UnsupportedLowering<VfmadotnOp>, K1UnsupportedLowering<VmadotnOp>,
@@ -275,12 +310,12 @@ void mlir::configureIMELegalizeForExportTarget(LLVMConversionTarget &target) {
   target.addLegalDialect<IMEDialect>();
   target.addLegalDialect<arith::ArithDialect>();
   target.addLegalDialect<memref::MemRefDialect>();
-  target.addIllegalOp<VmadotOp, VmadotuOp, VmadotsuOp, VmadotusOp, VfmadotOp,
-                      Vmadot1Op, Vmadot1uOp, Vmadot1suOp, Vmadot1usOp,
-                      Vmadot2Op, Vmadot2uOp, Vmadot2suOp, Vmadot2usOp,
-                      Vmadot3Op, Vmadot3uOp, Vmadot3suOp, Vmadot3usOp,
-                      Vfmadot1Op, Vfmadot2Op, Vfmadot3Op, VmadotnOp, VmadotnuOp,
-                      VmadotnsuOp, VmadotnusOp, VfmadotnOp>();
+  target.addIllegalOp<
+      VmadotOp, VmadotuOp, VmadotsuOp, VmadotusOp, VfmadotOp, Vmadot1Op,
+      Vmadot1uOp, Vmadot1suOp, Vmadot1usOp, Vmadot2Op, Vmadot2uOp, Vmadot2suOp,
+      Vmadot2usOp, Vmadot3Op, Vmadot3uOp, Vmadot3suOp, Vmadot3usOp, Vfmadot1Op,
+      Vfmadot2Op, Vfmadot3Op, VmadotnOp, VmadotnuOp, VmadotnsuOp, VmadotnusOp,
+      VfmadotnOp, TileVmadotOp, TileVmadotuOp>();
 }
 
 std::unique_ptr<Pass> buddy::ime::createLegalizeForLLVMExportPass() {
