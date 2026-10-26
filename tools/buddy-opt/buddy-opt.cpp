@@ -29,6 +29,8 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Support/FileUtilities.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
+
+#include "Utils/TargetInfo.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/SourceMgr.h"
@@ -201,6 +203,8 @@ int main(int argc, char **argv) {
   mlir::buddy::registerConvNhwcFhwcTileOptimizePass();
   mlir::buddy::registerDepthwiseConv2DNhwcHwcOptimizePass();
   mlir::buddy::registerAssumeTightMemRefLayoutPass();
+  mlir::buddy::registerSetLLVMTargetPass();
+  mlir::buddy::registerTestTargetInfoPass();
   mlir::buddy::registerStaticizeMemRefLayoutPass();
   mlir::buddy::registerMatMulTransposeBVecPass();
   mlir::buddy::registerMatMulTransposeBVecDecodePass();

@@ -75,6 +75,7 @@ target_link_libraries(buddy-opt
   VIRToVectorPass
   TosaElementwiseFusion
   AssumeTightMemRefLayoutPass
+  BuddyTargetInfo
   StaticizeMemRefLayoutPass
   EliminateMemRefCopyPass
   EliminateLargeZeroConstants

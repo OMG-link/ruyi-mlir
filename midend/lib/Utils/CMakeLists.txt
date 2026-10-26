@@ -48,3 +48,5 @@ add_mlir_library(BuddyGPUUtils
   MLIRViewLikeInterface
   MLIRGPUPasses
 )
+
+add_subdirectory(TargetInfo)
