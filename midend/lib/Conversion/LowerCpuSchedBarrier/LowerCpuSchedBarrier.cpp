@@ -61,7 +61,12 @@ Type getRegisterType(VectorType ty, const mlir::buddy::TargetInfo &target,
   case mlir::buddy::TargetInfo::Arch::RISCV: {
     // A group of LMUL registers holds LMUL * VLEN bits; LMUL is a power of
     // two in [1/8, 8], so the operand's size is VLEN / 8 .. 8 VLEN.
-    int64_t vlen = target.getVectorRegisterBits();
+    auto exactVLen = target.getExactVectorRegisterBits();
+    if (!exactVLen) {
+      reason = "exact RISC-V VLEN is required for scheduling barrier lowering";
+      return {};
+    }
+    int64_t vlen = *exactVLen;
     if (bits * 8 < vlen || bits > 8 * vlen || !llvm::isPowerOf2_64(bits) ||
         !target.supportsVectorElementType(ty.getElementType())) {
       reason = ("operand of " + Twine(bits) +

@@ -52,7 +52,7 @@ bool TargetInfo::hasVector() const {
   llvm_unreachable("unknown target architecture");
 }
 
-unsigned TargetInfo::getVectorRegisterBits() const {
+unsigned TargetInfo::getMinVectorRegisterBits() const {
   switch (arch) {
   case Arch::RISCV:
     return isa->getMinVLen();
@@ -64,6 +64,13 @@ unsigned TargetInfo::getVectorRegisterBits() const {
     return hasExtension("sse2") ? 128 : 0;
   }
   llvm_unreachable("unknown target architecture");
+}
+
+std::optional<unsigned> TargetInfo::getExactVectorRegisterBits() const {
+  if (arch == Arch::RISCV)
+    return std::nullopt;
+  unsigned bits = getMinVectorRegisterBits();
+  return bits ? std::optional<unsigned>(bits) : std::nullopt;
 }
 
 bool TargetInfo::supportsVectorElementType(Type type) const {
@@ -98,7 +105,7 @@ unsigned TargetInfo::getRegisterGroupElements(Type type,
   if (!supportsVectorElementType(type) || registers == 0 ||
       registers > kMaxGroupRegisters)
     return 0;
-  return getVectorRegisterBits() * registers / type.getIntOrFloatBitWidth();
+  return getMinVectorRegisterBits() * registers / type.getIntOrFloatBitWidth();
 }
 
 std::string TargetInfo::describe() const {
@@ -110,20 +117,26 @@ std::string TargetInfo::describe() const {
   case Arch::RISCV:
     os << "xlen: " << isa->getXLen() << "\n";
     os << "vector: " << (hasVector() ? "yes" : "no") << "\n";
-    os << "vlen: " << getVectorRegisterBits() << "\n";
+    os << "min-vlen: " << getMinVectorRegisterBits() << "\n";
     os << "elen: " << isa->getMaxELen() << "\n";
     os << "elen-fp: " << isa->getMaxELenFp() << "\n";
     os << "isa: " << isa->toString() << "\n";
     break;
   case Arch::X86: {
     os << "vector: " << (hasVector() ? "yes" : "no") << "\n";
-    os << "vector-bits: " << getVectorRegisterBits() << "\n";
+    os << "vector-bits: " << getMinVectorRegisterBits() << "\n";
     SmallVector<StringRef> names(x86Features.keys());
     llvm::sort(names);
     os << "features: " << llvm::join(names, ",") << "\n";
     break;
   }
   }
+  os << "exact-vector-bits: ";
+  if (auto bits = getExactVectorRegisterBits())
+    os << *bits;
+  else
+    os << "unknown";
+  os << "\n";
   return text;
 }
 

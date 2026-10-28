@@ -7,7 +7,7 @@
 
 // CHECK: module attributes {llvm.target = #llvm.target<triple = "riscv64-unknown-linux-gnu", chip = "spacemit-x60", features = <["+zvl512b", "-zvfh"]>>}
 // INFO: chip: spacemit-x60
-// INFO: vlen: 256
+// INFO: min-vlen: 256
 // BAD: unknown RISC-V processor 'no-such-core'
 module {
   func.func @f() {

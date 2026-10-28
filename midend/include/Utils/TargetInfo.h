@@ -43,6 +43,7 @@
 #include "llvm/TargetParser/RISCVISAInfo.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace mlir {
@@ -79,11 +80,16 @@ public:
   /// SSE2 on x86.
   bool hasVector() const;
 
-  /// Width of one vector register in bits. On RISC-V this is VLEN: Zvl*
-  /// gives a lower bound, and LLVM's processor tables state the actual VLEN
-  /// of the cores this project targets. On x86 it is the widest of XMM, YMM
-  /// and ZMM the features enable.
-  unsigned getVectorRegisterBits() const;
+  /// Minimum vector register width guaranteed by the target. On RISC-V this
+  /// is the ISA's Zvl* lower bound, not an exact hardware VLEN. On x86 this
+  /// is the widest register enabled by the target features.
+  unsigned getMinVectorRegisterBits() const;
+
+  /// Exact vector register width when established by the target description.
+  /// RISC-V ISA extensions currently provide only a lower bound, so this
+  /// returns std::nullopt even for a named CPU. On x86 the enabled register
+  /// width is exact. No exact width is inferred from a Zvl* extension.
+  std::optional<unsigned> getExactVectorRegisterBits() const;
 
   /// The most registers one vector value may span: LMUL=8 on RISC-V, and
   /// the same count on x86, where LLVM splits a wide vector across
@@ -93,7 +99,8 @@ public:
   /// True when vector instructions operate on elements of `type`.
   bool supportsVectorElementType(Type type) const;
 
-  /// Elements of `type` that fit in a group of `registers` vector registers,
+  /// Elements of `type` guaranteed to fit in `registers` vector registers
+  /// using the minimum register width,
   /// or 0 when the type is not a supported vector element type.
   unsigned
   getRegisterGroupElements(Type type,

@@ -8,10 +8,11 @@
 // CHECK-NEXT: chip: spacemit-x60
 // CHECK-NEXT: xlen: 64
 // CHECK-NEXT: vector: yes
-// CHECK-NEXT: vlen: 256
+// CHECK-NEXT: min-vlen: 256
 // CHECK-NEXT: elen: 64
 // CHECK-NEXT: elen-fp: 64
 // CHECK-NEXT: isa: {{.*}}_zvfh1p0{{.*}}_zvl256b1p0{{.*}}_xsmtvdot1p0
+// CHECK-NEXT: exact-vector-bits: unknown
 // CHECK-NEXT: elements i8: m1=32 m8=256
 // CHECK-NEXT: elements i32: m1=8 m8=64
 // CHECK-NEXT: elements i64: m1=4 m8=32
@@ -25,7 +26,7 @@ module attributes {llvm.target = #llvm.target<triple = "riscv64-unknown-linux-gn
 
 // The SpacemiT A100 (K3): VLEN 1024 and the second IME generation.
 // CHECK-LABEL: chip: spacemit-a100
-// CHECK: vlen: 1024
+// CHECK: min-vlen: 1024
 // CHECK: isa: {{.*}}_xsmtvdotii1p0
 // CHECK: elements i8: m1=128 m8=1024
 module attributes {llvm.target = #llvm.target<triple = "riscv64-unknown-linux-gnu", chip = "spacemit-a100">} {
@@ -36,7 +37,7 @@ module attributes {llvm.target = #llvm.target<triple = "riscv64-unknown-linux-gn
 // Features alone describe a target without a named chip, and a feature can
 // remove an extension the chip has.
 // CHECK-LABEL: chip: generic
-// CHECK: vlen: 512
+// CHECK: min-vlen: 512
 // CHECK: elements f16: m1=0 m8=0
 module attributes {llvm.target = #llvm.target<triple = "riscv64-unknown-linux-gnu", chip = "generic", features = #llvm.target_features<["+m", "+f", "+d", "+v", "+zvl512b"]>>} {
 }
@@ -87,6 +88,7 @@ module attributes {llvm.target = #llvm.target<triple = "riscv64-unknown-linux-gn
 // CHECK-NEXT: vector: yes
 // CHECK-NEXT: vector-bits: 512
 // CHECK-NEXT: features: {{.*}}avx512f
+// CHECK-NEXT: exact-vector-bits: 512
 // CHECK-NEXT: elements i8: m1=64 m8=512
 // CHECK-NEXT: elements i32: m1=16 m8=128
 // CHECK-NEXT: elements i64: m1=8 m8=64

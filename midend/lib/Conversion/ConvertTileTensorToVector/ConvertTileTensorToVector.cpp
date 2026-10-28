@@ -185,7 +185,7 @@ struct TileDot {
 bool hasK1TileDot(const mlir::buddy::TargetInfo &target) {
   return target.getArch() == mlir::buddy::TargetInfo::Arch::RISCV &&
          target.hasExtension("xsmtvdot") &&
-         target.getVectorRegisterBits() == 256;
+         target.getExactVectorRegisterBits() == 256;
 }
 
 bool isTileType(Value v, ArrayRef<int64_t> shape, unsigned width) {

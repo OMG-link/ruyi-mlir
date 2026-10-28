@@ -140,7 +140,7 @@ public:
       return signalPassFailure();
     if (target->getArch() != mlir::buddy::TargetInfo::Arch::RISCV ||
         !target->hasExtension("xsmtvdot") ||
-        target->getVectorRegisterBits() != 256)
+        target->getExactVectorRegisterBits() != 256)
       return;
     RewritePatternSet patterns(&getContext());
     patterns.add<ContractToTileDot>(&getContext());
