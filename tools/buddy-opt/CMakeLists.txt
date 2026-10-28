@@ -77,6 +77,8 @@ target_link_libraries(buddy-opt
   AssumeTightMemRefLayoutPass
   BuddyTargetInfo
   ConvertTileTensorToVectorPass
+  FlattenVectorTilesPass
+  LowerVectorContractToIMETilePass
   StaticizeMemRefLayoutPass
   EliminateMemRefCopyPass
   EliminateLargeZeroConstants

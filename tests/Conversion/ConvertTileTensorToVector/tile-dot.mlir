@@ -1,27 +1,28 @@
-// RUN: buddy-opt %s -set-llvm-target="chip=spacemit-x60" -convert-tile-tensor-to-vector=ime-tile-dot -canonicalize -split-input-file | FileCheck %s
-// RUN: buddy-opt %s -set-llvm-target="chip=spacemit-a100" -convert-tile-tensor-to-vector=ime-tile-dot -split-input-file -remarks-filter-missed=tile-to-vector -o /dev/null 2>&1 | FileCheck %s --check-prefix=NODOT
-// RUN: buddy-opt %s -set-llvm-target="triple=x86_64-unknown-linux-gnu chip=icelake-server" -convert-tile-tensor-to-vector=ime-tile-dot -split-input-file -remarks-filter-missed=tile-to-vector -o /dev/null 2>&1 | FileCheck %s --check-prefix=NODOT
+// RUN: buddy-opt %s -set-llvm-target="chip=spacemit-x60" -convert-tile-tensor-to-vector=contract-k1-tiles -canonicalize -split-input-file | FileCheck %s
+// RUN: buddy-opt %s -set-llvm-target="chip=spacemit-a100" -convert-tile-tensor-to-vector=contract-k1-tiles -split-input-file -remarks-filter-missed=tile-to-vector -o /dev/null 2>&1 | FileCheck %s --check-prefix=NODOT
+// RUN: buddy-opt %s -set-llvm-target="triple=x86_64-unknown-linux-gnu chip=icelake-server" -convert-tile-tensor-to-vector=contract-k1-tiles -split-input-file -remarks-filter-missed=tile-to-vector -o /dev/null 2>&1 | FileCheck %s --check-prefix=NODOT
 // RUN: buddy-opt %s -set-llvm-target="chip=spacemit-x60" -convert-tile-tensor-to-vector -split-input-file -remarks-filter-missed=tile-to-vector -o /dev/null 2>&1 | FileCheck %s --check-prefix=NODOT
 //
-// On the K1 (XSMTVDot, VLEN = 256), matmul(A, transpose(B)) on 4x8 int8
-// tiles into a 4x4 int32 tile is one vmadot, so it becomes a value-level
-// tile dot and its operands stay in registers. The transpose is absorbed:
-// the dot reads B in N x K order. A dot accumulated from zero and then added
-// to a running tile accumulates into that tile directly. Targets without
-// the K1 tile dot, or pipelines without -lower-ime, keep the matmul in
-// tensors.
+// With contract-k1-tiles, on the K1 (XSMTVDot, VLEN = 256),
+// matmul(A, transpose(B)) on 4x8 int8 tiles into a 4x4 int32 tile becomes
+// vector.transpose plus vector.contract on extended operands. Targets without the K1 tile dot, or pipelines that do not set
+// the option, keep the matmul in tensors.
 
 #map = affine_map<(d0, d1) -> (d0, d1)>
 
 // CHECK-LABEL: func.func @accumulate
-// CHECK: scf.for {{.*}} iter_args(%[[ACC:[a-z0-9_]+]] = {{.*}}) -> (vector<16xi32>)
-// CHECK-DAG: %[[A:[a-z0-9_]+]] = vector.load {{.*}} vector<32xi8>
-// CHECK-DAG: %[[B:[a-z0-9_]+]] = vector.load {{.*}} vector<32xi8>
-// CHECK: %[[D:[a-z0-9_]+]] = ime.tile.vmadot %[[ACC]], %[[A]], %[[B]] : vector<32xi8>, vector<32xi8> into vector<16xi32>
+// CHECK: scf.for {{.*}} iter_args(%[[ACC:[a-z0-9_]+]] = {{.*}}) -> (vector<4x4xi32>)
+// CHECK-DAG: %[[A:.+]] = vector.transfer_read {{.*}} vector<4x8xi8>
+// CHECK-DAG: %[[B:.+]] = vector.transfer_read {{.*}} vector<4x8xi8>
+// CHECK: %[[BT:.+]] = vector.transpose %[[B]], [1, 0] : vector<4x8xi8> to vector<8x4xi8>
+// CHECK-DAG: %[[EA:.+]] = arith.extsi %[[A]] : vector<4x8xi8> to vector<4x8xi32>
+// CHECK-DAG: %[[EB:.+]] = arith.extsi %[[BT]] : vector<8x4xi8> to vector<8x4xi32>
+// The add into the running tile folds into the contraction (upstream
+// canonicalization).
+// CHECK: %[[D:.+]] = vector.contract {{.*}} %[[EA]], %[[EB]], %[[ACC]] : vector<4x8xi32>, vector<8x4xi32> into vector<4x4xi32>
 // CHECK: scf.yield %[[D]]
 // CHECK-NOT: linalg.transpose
 // CHECK-NOT: linalg.matmul
-// CHECK-NOT: arith.addi {{.*}} vector<16xi32>
 // NODOT: [Missed] component | Category:tile-to-vector | Reason="'linalg.matmul' has no vector form here"
 func.func @accumulate(%a: memref<4x8xi8>, %b: memref<4x8xi8>, %c: memref<4x4xi32>) {
   %c0 = arith.constant 0 : index
@@ -50,9 +51,10 @@ func.func @accumulate(%a: memref<4x8xi8>, %b: memref<4x8xi8>, %c: memref<4x4xi32
 
 // -----
 
-// Unsigned inputs select vmadotu.
+// Unsigned inputs extend with extui.
 // CHECK-LABEL: func.func @unsigned
-// CHECK: ime.tile.vmadotu
+// CHECK: arith.extui
+// CHECK: vector.contract
 func.func @unsigned(%a: memref<4x8xi8>, %b: memref<4x8xi8>, %c: memref<4x4xi32>) {
   %zero = arith.constant 0 : i32
   %e = tensor.empty() : tensor<4x4xi32>
@@ -68,12 +70,12 @@ func.func @unsigned(%a: memref<4x8xi8>, %b: memref<4x8xi8>, %c: memref<4x4xi32>)
 
 // -----
 
-// A transpose with a reader other than a tile dot is not absorbed, so the
-// whole component stays in tensors.
+// A transpose with a reader other than a K1 tile product blocks the whole
+// component.
 // CHECK-LABEL: func.func @shared_transpose
 // CHECK: linalg.transpose
 // CHECK: linalg.matmul
-// CHECK-NOT: ime.tile
+// CHECK-NOT: vector.contract
 func.func @shared_transpose(%a: memref<4x8xi8>, %b: memref<4x8xi8>, %c: memref<4x4xi32>, %d: memref<8x4xi8>) {
   %zero = arith.constant 0 : i32
   %e = tensor.empty() : tensor<4x4xi32>

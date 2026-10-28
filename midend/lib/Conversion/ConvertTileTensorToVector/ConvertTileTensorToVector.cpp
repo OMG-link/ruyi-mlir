@@ -15,26 +15,38 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// `--convert-tile-tensor-to-vector` rewrites tile-sized tensors into flat
-// 1-D vectors so that they live in a vector register group instead of being
-// bufferized into a heap buffer and copied element by element.
+// `--convert-tile-tensor-to-vector` rewrites tile-sized tensors into vectors
+// of the same shape, so that they live in vector registers instead of being
+// bufferized into a heap buffer and copied element by element. It only
+// changes types: tensor<d0 x ... x T> becomes vector<d0 x ... x T>, and each
+// op becomes the vector op with the same meaning. How a vector moves between
+// memory and registers, and how an n-D vector maps onto 1-D registers, is
+// left to the vector lowering (`--flatten-vector-tiles`, VectorToSCF,
+// VectorToLLVM).
 //
-// A tensor<d0 x ... x T> becomes vector<N x T>, N = d0 * ... , in row-major
-// order. Tensor values are grouped into connected components by union-find:
-// a convertible op joins all the tensor values it reads (that matter) and
+// Tensor values are grouped into connected components by union-find: a
+// convertible op joins all the tensor values it reads (that matter) and
 // produces, and `scf.for` joins, per iter_arg, the init, region argument,
 // yield operand and result. A component converts only when every value in it
 // is legal (static shape, a vector element type of the target, and at most
-// one LMUL=8 register group) and no op touching it is a blocker. Converting a
+// one 8-register group) and no op touching it is a blocker. Converting a
 // component never introduces a vector<->tensor conversion, so a component is
 // converted entirely or not at all.
 //
-// With `ime-tile-dot`, on the SpacemiT K1 (XSMTVDot, VLEN = 256), a
-// `linalg.matmul(A, linalg.transpose(B))` on 4x8 int8 tiles into a 4x4 int32
-// tile is one vmadot: it becomes `ime.tile.vmadot(u)` on the flat vectors,
-// the transpose is absorbed when only such dots read it, and a dot from a
-// zero accumulator that is then added to a tile accumulates into that tile.
-// The option is set by pipelines that run `-lower-ime`.
+//   bufferization.to_tensor             vector.transfer_read
+//   bufferization.materialize_in_dest.  vector.transfer_write
+//   linalg.fill                         vector.broadcast
+//   elementwise linalg.generic          its body on vectors
+//   tensor.expand/collapse_shape        vector.shape_cast
+//   scf.for iter_args                   vector iter_args
+//
+// With `contract-k1-tiles`, `linalg.matmul(A, linalg.transpose(B))` of the
+// SpacemiT K1 IME tile shape (4x8 int8 by 8x4 int8 into 4x4 int32, on a
+// target with XSMTVDot at VLEN = 256) also converts, to `vector.transpose`
+// and a `vector.contract` on extended operands. Other matmuls and
+// transposes block, because only those have a register-level lowering
+// (`--lower-vector-contract-to-ime-tile`) in the pipelines that set the
+// option.
 //
 // Values that carry no data dependence — `tensor.empty`, dense
 // `arith.constant`, the `outs` of `linalg.fill` and the unused `outs` of a
@@ -59,12 +71,9 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/IRMapping.h"
-#include "mlir/IR/Matchers.h"
 #include "mlir/IR/Remarks.h"
 #include "mlir/Pass/Pass.h"
 
-#include "Dialect/IME/IMEDialect.h"
-#include "Dialect/IME/IMEOps.h"
 #include "Utils/TargetInfo.h"
 
 #include "llvm/ADT/DenseMap.h"
@@ -157,15 +166,15 @@ bool isElementwiseGeneric(linalg::GenericOp generic, std::string &reason) {
   return true;
 }
 
-/// `linalg.matmul(A, linalg.transpose(B))` on the register tiles of one K1
-/// IME dot: A and B are 4x8 int8 (B stored as N x K), C is 4x4 int32.
+/// `linalg.matmul(A, linalg.transpose(B))` of the K1 IME tile shape: A and B
+/// are 4x8 int8 (B stored as N x K), C is 4x4 int32.
 struct TileDot {
   Value lhs, rhs, acc;
   bool isUnsigned;
 };
 
-/// True when the target executes one tile dot as a single `vmadot`: the K1's
-/// XSMTVDot at VLEN = 256, where a 4x8 int8 tile is one register.
+/// True when the target executes one such tile product as a single `vmadot`:
+/// the K1's XSMTVDot at VLEN = 256, where a 4x8 int8 tile is one register.
 bool hasK1TileDot(const mlir::buddy::TargetInfo &target) {
   return target.getArch() == mlir::buddy::TargetInfo::Arch::RISCV &&
          target.hasExtension("xsmtvdot") &&
@@ -195,8 +204,8 @@ std::optional<TileDot> matchTileDot(linalg::MatmulOp matmul) {
                  matmul.getCast() == linalg::TypeFn::cast_unsigned};
 }
 
-/// A transpose consumed only as the B operand of tile dots needs no op of its
-/// own: the dot reads B in N x K order.
+/// A transpose read only as the B operand of K1 tile products converts with
+/// them; the IME lowering reads B in N x K order and drops it.
 bool isAbsorbedTranspose(linalg::TransposeOp transpose,
                          const mlir::buddy::TargetInfo &target) {
   if (!hasK1TileDot(target) || transpose->use_empty())
@@ -219,21 +228,21 @@ public:
   ConvertTileTensorToVectorPass(const ConvertTileTensorToVectorPass &other)
       : PassWrapper(other) {}
 
-  Option<bool> imeTileDot{
-      *this, "ime-tile-dot",
-      llvm::cl::desc("Rewrite K1-sized matmul(A, transpose(B)) into "
-                     "ime.tile dots; needs -lower-ime later in the pipeline"),
+  Option<bool> contractK1Tiles{
+      *this, "contract-k1-tiles",
+      llvm::cl::desc("Convert K1-tile-sized matmul(A, transpose(B)) into "
+                     "vector.contract; needs "
+                     "-lower-vector-contract-to-ime-tile later"),
       llvm::cl::init(false)};
   StringRef getArgument() const final {
     return "convert-tile-tensor-to-vector";
   }
   StringRef getDescription() const final {
-    return "Rewrite register-sized tensor components into flat vectors";
+    return "Rewrite register-sized tensor components into vectors";
   }
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<arith::ArithDialect, memref::MemRefDialect,
-                    vector::VectorDialect, tensor::TensorDialect,
-                    ::buddy::ime::IMEDialect>();
+                    vector::VectorDialect, tensor::TensorDialect>();
   }
 
   void runOnOperation() override;
@@ -301,13 +310,13 @@ private:
   IRMapping mapping;
   SmallVector<Operation *> toErase;
 
-  VectorType flatType(Type tensorTy) {
+  /// The vector a tensor value becomes: same shape, same element type.
+  VectorType vectorType(Type tensorTy) {
     auto t = cast<RankedTensorType>(tensorTy);
-    return VectorType::get({t.getNumElements()}, t.getElementType());
+    return VectorType::get(t.getShape(), t.getElementType());
   }
   Value lookup(OpBuilder &b, Value v);
   void rewrite(func::FuncOp func);
-  void foldDotAccumulation(func::FuncOp func);
   void rewriteOp(OpBuilder &b, Operation *op);
   Value loadTile(OpBuilder &b, Location loc, Value memref, VectorType vecTy);
   void storeTile(OpBuilder &b, Location loc, Value vec, Value memref);
@@ -375,15 +384,17 @@ void ConvertTileTensorToVectorPass::analyze(
               "store target is not row-major with unit innermost stride");
       return;
     } else if (auto matmul = dyn_cast<linalg::MatmulOp>(op)) {
-      if (imeTileDot && hasK1TileDot(target)) {
+      if (contractK1Tiles && hasK1TileDot(target)) {
         if (std::optional<TileDot> dot = matchTileDot(matmul)) {
           uniteAll({dot->lhs, dot->rhs, dot->acc, matmul.getResult(0)});
           return;
         }
       }
     } else if (auto transpose = dyn_cast<linalg::TransposeOp>(op)) {
-      if (imeTileDot && isAbsorbedTranspose(transpose, target))
+      if (contractK1Tiles && isAbsorbedTranspose(transpose, target)) {
+        uniteAll({transpose.getInput(), transpose.getResult()[0]});
         return;
+      }
     } else if (auto generic = dyn_cast<linalg::GenericOp>(op)) {
       std::string reason;
       if (isElementwiseGeneric(generic, reason)) {
@@ -394,14 +405,14 @@ void ConvertTileTensorToVectorPass::analyze(
         llvm::append_range(vs, generic.getResults());
         uniteAll(vs);
         // Intermediate body values become vectors too.
-        int64_t n =
-            cast<ShapedType>(generic.getResult(0).getType()).getNumElements();
+        ArrayRef<int64_t> shape =
+            cast<ShapedType>(generic.getResult(0).getType()).getShape();
         for (Operation &bodyOp : generic.getBody()->without_terminator())
           for (Type t : bodyOp.getResultTypes()) {
             if (t.isInteger(1))
               continue;
             std::string why;
-            if (!isLegalType(RankedTensorType::get({n}, t), target, why))
+            if (!isLegalType(RankedTensorType::get(shape, t), target, why))
               block(generic.getResult(0), bodyOp.getLoc(),
                     "intermediate value: " + why);
           }
@@ -456,8 +467,9 @@ Value ConvertTileTensorToVectorPass::lookup(OpBuilder &b, Value v) {
     return m;
   Operation *def = v.getDefiningOp();
   assert(def && isSource(def) && "unconverted value inside a component");
-  VectorType vecTy = flatType(v.getType());
+  VectorType vecTy = vectorType(v.getType());
   Location loc = def->getLoc();
+  // Same shape, so the dense attribute only changes its type.
   if (auto cst = dyn_cast<arith::ConstantOp>(def)) {
     auto attr = cast<DenseElementsAttr>(cst.getValue()).reshape(vecTy);
     return arith::ConstantOp::create(b, loc, vecTy, attr);
@@ -471,38 +483,12 @@ Value ConvertTileTensorToVectorPass::loadTile(OpBuilder &b, Location loc,
   memref = stripCasts(memref);
   auto ty = cast<MemRefType>(memref.getType());
   Value c0 = arith::ConstantIndexOp::create(b, loc, 0);
-  if (classifyMemref(memref, ty) == Access::Contiguous) {
-    if (ty.getRank() != 1) {
-      SmallVector<ReassociationIndices> reassoc(1);
-      for (int64_t i = 0; i < ty.getRank(); ++i)
-        reassoc[0].push_back(i);
-      memref = memref::CollapseShapeOp::create(b, loc, memref, reassoc);
-    }
-    return vector::LoadOp::create(b, loc, vecTy, memref, ValueRange{c0});
-  }
-  // One load per innermost row.
-  ArrayRef<int64_t> shape = ty.getShape();
-  int64_t rowLen = shape.back();
-  auto rowTy = VectorType::get({rowLen}, ty.getElementType());
-  Value acc = arith::ConstantOp::create(b, loc, vecTy,
-                                        cast<TypedAttr>(b.getZeroAttr(vecTy)));
-  int64_t rows = vecTy.getNumElements() / rowLen;
-  for (int64_t r = 0; r < rows; ++r) {
-    SmallVector<Value> idx;
-    int64_t rem = r;
-    SmallVector<int64_t> coords(shape.size() - 1);
-    for (int64_t d = shape.size() - 2; d >= 0; --d) {
-      coords[d] = rem % shape[d];
-      rem /= shape[d];
-    }
-    for (int64_t c : coords)
-      idx.push_back(arith::ConstantIndexOp::create(b, loc, c));
-    idx.push_back(c0);
-    Value row = vector::LoadOp::create(b, loc, rowTy, memref, idx);
-    acc = vector::InsertStridedSliceOp::create(
-        b, loc, row, acc, ArrayRef<int64_t>{r * rowLen}, ArrayRef<int64_t>{1});
-  }
-  return acc;
+  SmallVector<Value> indices(ty.getRank(), c0);
+  Value padding = arith::ConstantOp::create(
+      b, loc, cast<TypedAttr>(b.getZeroAttr(ty.getElementType())));
+  SmallVector<bool> inBounds(vecTy.getRank(), true);
+  return vector::TransferReadOp::create(b, loc, vecTy, memref, indices, padding,
+                                        inBounds);
 }
 
 void ConvertTileTensorToVectorPass::storeTile(OpBuilder &b, Location loc,
@@ -510,35 +496,9 @@ void ConvertTileTensorToVectorPass::storeTile(OpBuilder &b, Location loc,
   memref = stripCasts(memref);
   auto ty = cast<MemRefType>(memref.getType());
   Value c0 = arith::ConstantIndexOp::create(b, loc, 0);
-  if (classifyMemref(memref, ty) == Access::Contiguous) {
-    if (ty.getRank() != 1) {
-      SmallVector<ReassociationIndices> reassoc(1);
-      for (int64_t i = 0; i < ty.getRank(); ++i)
-        reassoc[0].push_back(i);
-      memref = memref::CollapseShapeOp::create(b, loc, memref, reassoc);
-    }
-    vector::StoreOp::create(b, loc, vec, memref, ValueRange{c0});
-    return;
-  }
-  ArrayRef<int64_t> shape = ty.getShape();
-  int64_t rowLen = shape.back();
-  int64_t rows = cast<VectorType>(vec.getType()).getNumElements() / rowLen;
-  for (int64_t r = 0; r < rows; ++r) {
-    SmallVector<Value> idx;
-    int64_t rem = r;
-    SmallVector<int64_t> coords(shape.size() - 1);
-    for (int64_t d = shape.size() - 2; d >= 0; --d) {
-      coords[d] = rem % shape[d];
-      rem /= shape[d];
-    }
-    for (int64_t c : coords)
-      idx.push_back(arith::ConstantIndexOp::create(b, loc, c));
-    idx.push_back(c0);
-    Value row = vector::ExtractStridedSliceOp::create(
-        b, loc, vec, ArrayRef<int64_t>{r * rowLen}, ArrayRef<int64_t>{rowLen},
-        ArrayRef<int64_t>{1});
-    vector::StoreOp::create(b, loc, row, memref, idx);
-  }
+  SmallVector<Value> indices(ty.getRank(), c0);
+  SmallVector<bool> inBounds(cast<VectorType>(vec.getType()).getRank(), true);
+  vector::TransferWriteOp::create(b, loc, vec, memref, indices, inBounds);
 }
 
 void ConvertTileTensorToVectorPass::rewriteOp(OpBuilder &b, Operation *op) {
@@ -551,7 +511,7 @@ void ConvertTileTensorToVectorPass::rewriteOp(OpBuilder &b, Operation *op) {
     Value res = fill.getResult(0);
     if (!isConverted(res))
       return;
-    Value v = vector::BroadcastOp::create(b, loc, flatType(res.getType()),
+    Value v = vector::BroadcastOp::create(b, loc, vectorType(res.getType()),
                                           fill.getInputs()[0]);
     mapping.map(res, v);
     toErase.push_back(op);
@@ -561,7 +521,7 @@ void ConvertTileTensorToVectorPass::rewriteOp(OpBuilder &b, Operation *op) {
     if (!isConverted(load.getResult()))
       return;
     mapping.map(load.getResult(),
-                loadTile(b, loc, load.getBuffer(), flatType(load.getType())));
+                loadTile(b, loc, load.getBuffer(), vectorType(load.getType())));
     toErase.push_back(op);
     return;
   }
@@ -588,36 +548,49 @@ void ConvertTileTensorToVectorPass::rewriteOp(OpBuilder &b, Operation *op) {
   if (auto matmul = dyn_cast<linalg::MatmulOp>(op)) {
     if (!matmul.hasPureTensorSemantics() || !isConverted(matmul.getResult(0)))
       return;
-    // Only matched tile dots join a component, so this matches.
-    TileDot dot = *matchTileDot(matmul);
-    Value acc = lookup(b, dot.acc), lhs = lookup(b, dot.lhs),
-          rhs = lookup(b, dot.rhs);
-    Value res = dot.isUnsigned
-                    ? ::buddy::ime::TileVmadotuOp::create(b, loc, acc, lhs, rhs)
-                          .getResult()
-                    : ::buddy::ime::TileVmadotOp::create(b, loc, acc, lhs, rhs)
-                          .getResult();
+    // C + sum_k ext(A[m,k]) * ext(B[k,n]), with linalg.matmul's cast.
+    Type i32 = b.getI32Type();
+    bool isUnsigned = matmul.getCast() == linalg::TypeFn::cast_unsigned;
+    auto extend = [&](Value v) -> Value {
+      auto ty = cast<VectorType>(v.getType());
+      auto wide = VectorType::get(ty.getShape(), i32);
+      return isUnsigned ? arith::ExtUIOp::create(b, loc, wide, v).getResult()
+                        : arith::ExtSIOp::create(b, loc, wide, v).getResult();
+    };
+    Value lhs = extend(lookup(b, matmul.getDpsInputs()[0]));
+    Value rhs = extend(lookup(b, matmul.getDpsInputs()[1]));
+    Value acc = lookup(b, matmul.getDpsInits()[0]);
+    MLIRContext *ctx = b.getContext();
+    AffineExpr m, n, k;
+    bindDims(ctx, m, n, k);
+    auto maps = b.getAffineMapArrayAttr({AffineMap::get(3, 0, {m, k}, ctx),
+                                         AffineMap::get(3, 0, {k, n}, ctx),
+                                         AffineMap::get(3, 0, {m, n}, ctx)});
+    auto par =
+        vector::IteratorTypeAttr::get(ctx, vector::IteratorType::parallel);
+    auto red =
+        vector::IteratorTypeAttr::get(ctx, vector::IteratorType::reduction);
+    Value res = vector::ContractionOp::create(b, loc, lhs, rhs, acc, maps,
+                                              b.getArrayAttr({par, par, red}));
     mapping.map(matmul.getResult(0), res);
     toErase.push_back(op);
     return;
   }
   if (auto transpose = dyn_cast<linalg::TransposeOp>(op)) {
-    // An absorbed transpose dies with the dots that read it; it is listed
-    // before them, so it is erased after them.
-    auto users = transpose->getResult(0).getUsers();
-    if (transpose.hasPureTensorSemantics() && !transpose->use_empty() &&
-        llvm::all_of(users, [&](Operation *user) {
-          auto matmul = dyn_cast<linalg::MatmulOp>(user);
-          return matmul && isConverted(matmul.getResult(0));
-        }))
-      toErase.push_back(op);
+    if (!transpose.hasPureTensorSemantics() ||
+        !isConverted(transpose.getResult()[0]))
+      return;
+    Value res = vector::TransposeOp::create(
+        b, loc, lookup(b, transpose.getInput()), transpose.getPermutation());
+    mapping.map(transpose.getResult()[0], res);
+    toErase.push_back(op);
     return;
   }
   if (auto generic = dyn_cast<linalg::GenericOp>(op)) {
     if (generic.getNumResults() == 0 || !isConverted(generic.getResult(0)))
       return;
-    int64_t n =
-        cast<ShapedType>(generic.getResult(0).getType()).getNumElements();
+    ArrayRef<int64_t> shape =
+        cast<ShapedType>(generic.getResult(0).getType()).getShape();
     IRMapping body;
     for (OpOperand &opnd : generic->getOpOperands()) {
       BlockArgument arg = generic.getMatchingBlockArgument(&opnd);
@@ -628,7 +601,7 @@ void ConvertTileTensorToVectorPass::rewriteOp(OpBuilder &b, Operation *op) {
     auto mapOperand = [&](Value v) -> Value {
       if (Value m = body.lookupOrNull(v))
         return m;
-      auto vecTy = VectorType::get({n}, v.getType());
+      auto vecTy = VectorType::get(shape, v.getType());
       Value bc = vector::BroadcastOp::create(b, loc, vecTy, v);
       body.map(v, bc);
       return bc;
@@ -639,7 +612,7 @@ void ConvertTileTensorToVectorPass::rewriteOp(OpBuilder &b, Operation *op) {
         operands.push_back(mapOperand(v));
       SmallVector<Type> types;
       for (Type t : bodyOp.getResultTypes())
-        types.push_back(VectorType::get({n}, t));
+        types.push_back(VectorType::get(shape, t));
       OperationState state(bodyOp.getLoc(), bodyOp.getName(), operands, types,
                            bodyOp.getAttrs());
       Operation *clone = b.create(state);
@@ -654,7 +627,10 @@ void ConvertTileTensorToVectorPass::rewriteOp(OpBuilder &b, Operation *op) {
   if (isa<tensor::ExpandShapeOp, tensor::CollapseShapeOp>(op)) {
     if (!isConverted(op->getResult(0)))
       return;
-    mapping.map(op->getResult(0), lookup(b, op->getOperand(0)));
+    mapping.map(op->getResult(0),
+                vector::ShapeCastOp::create(
+                    b, loc, vectorType(op->getResult(0).getType()),
+                    lookup(b, op->getOperand(0))));
     toErase.push_back(op);
     return;
   }
@@ -665,7 +641,7 @@ void ConvertTileTensorToVectorPass::rewriteOp(OpBuilder &b, Operation *op) {
         continue;
       Value vInit = lookup(b, init);
       forOp.getInitArgsMutable()[i].set(vInit);
-      VectorType vecTy = flatType(arg.getType());
+      VectorType vecTy = vectorType(arg.getType());
       arg.setType(vecTy);
       forOp.getResult(i).setType(vecTy);
       mapping.map(arg, arg);
@@ -690,51 +666,11 @@ void ConvertTileTensorToVectorPass::rewriteOp(OpBuilder &b, Operation *op) {
       operands.push_back(isTensor(v) ? lookup(b, v) : v);
     SmallVector<Type> types;
     for (Type t : op->getResultTypes())
-      types.push_back(flatType(t));
+      types.push_back(vectorType(t));
     OperationState state(loc, op->getName(), operands, types, op->getAttrs());
     Operation *clone = b.create(state);
     mapping.map(op->getResults(), clone->getResults());
     toErase.push_back(op);
-  }
-}
-
-/// True when `v` is an all-zero vector: a zero splat constant or a broadcast
-/// of a zero scalar.
-bool isZeroVector(Value v) {
-  if (matchPattern(v, m_Zero()))
-    return true;
-  auto bc = v.getDefiningOp<vector::BroadcastOp>();
-  return bc && matchPattern(bc.getSource(), m_Zero());
-}
-
-/// `x + dot(0, a, b)` is `dot(x, a, b)`: the dot accumulates into x directly,
-/// as the instruction does, instead of into a zeroed register then added.
-template <typename DotOp> void foldOne(DotOp dot) {
-  if (!isZeroVector(dot.getAcc()) || !dot->hasOneUse())
-    return;
-  auto add = dyn_cast<arith::AddIOp>(*dot->user_begin());
-  if (!add)
-    return;
-  Value other = add.getLhs() == dot.getResult() ? add.getRhs() : add.getLhs();
-  OpBuilder b(add);
-  auto fused =
-      DotOp::create(b, dot.getLoc(), other, dot.getLhs(), dot.getRhs());
-  add.replaceAllUsesWith(fused.getResult());
-  add.erase();
-  dot.erase();
-}
-
-void ConvertTileTensorToVectorPass::foldDotAccumulation(func::FuncOp func) {
-  SmallVector<Operation *> dots;
-  func.walk([&](Operation *op) {
-    if (isa<::buddy::ime::TileVmadotOp, ::buddy::ime::TileVmadotuOp>(op))
-      dots.push_back(op);
-  });
-  for (Operation *op : dots) {
-    if (auto dot = dyn_cast<::buddy::ime::TileVmadotOp>(op))
-      foldOne(dot);
-    else
-      foldOne(cast<::buddy::ime::TileVmadotuOp>(op));
   }
 }
 
@@ -770,7 +706,6 @@ void ConvertTileTensorToVectorPass::rewrite(func::FuncOp func) {
     if (isSource(op) && op->use_empty())
       op->erase();
   });
-  foldDotAccumulation(func);
 }
 
 void ConvertTileTensorToVectorPass::runOnOperation() {

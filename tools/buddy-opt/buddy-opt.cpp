@@ -140,6 +140,8 @@ void registerSiLUFusionPass();
 void registerSimplifyTosaMatmulScalarPass();
 void registerEliminateMemRefCopyPass();
 void registerConvertTileTensorToVectorPass();
+void registerFlattenVectorTilesPass();
+void registerLowerVectorContractToIMETilePass();
 void registerEliminateLargeZeroConstantsPass();
 void registerConvertTraceToLLVMPass();
 } // namespace buddy
@@ -207,6 +209,8 @@ int main(int argc, char **argv) {
   mlir::buddy::registerSetLLVMTargetPass();
   mlir::buddy::registerTestTargetInfoPass();
   mlir::buddy::registerConvertTileTensorToVectorPass();
+  mlir::buddy::registerFlattenVectorTilesPass();
+  mlir::buddy::registerLowerVectorContractToIMETilePass();
   mlir::buddy::registerStaticizeMemRefLayoutPass();
   mlir::buddy::registerMatMulTransposeBVecPass();
   mlir::buddy::registerMatMulTransposeBVecDecodePass();
