@@ -15,7 +15,7 @@
 //===----------------------------------------------------------------------===//
 //
 // The hardware a pass compiles for, read from the `llvm.target` attribute of
-// the enclosing module:
+// the enclosing module (cpu.vlen optionally supplies exact RISC-V VLEN):
 //
 //   module attributes {llvm.target = #llvm.target<
 //       triple = "riscv64-unknown-linux-gnu", chip = "spacemit-x60",
@@ -55,9 +55,9 @@ public:
 
   /// A RISC-V target described by its ISA.
   TargetInfo(std::string triple, std::string chip,
-             std::unique_ptr<llvm::RISCVISAInfo> isa)
+             std::unique_ptr<llvm::RISCVISAInfo> isa, unsigned exactVLen = 0)
       : arch(Arch::RISCV), triple(std::move(triple)), chip(std::move(chip)),
-        isa(std::move(isa)) {}
+        isa(std::move(isa)), exactVLen(exactVLen) {}
   /// An x86 target described by its enabled feature set.
   TargetInfo(std::string triple, std::string chip, llvm::StringSet<> features)
       : arch(Arch::X86), triple(std::move(triple)), chip(std::move(chip)),
@@ -81,14 +81,16 @@ public:
   bool hasVector() const;
 
   /// Minimum vector register width guaranteed by the target. On RISC-V this
-  /// is the ISA's Zvl* lower bound, not an exact hardware VLEN. On x86 this
+  /// is the ISA's Zvl* lower bound unless cpu.vlen supplies an exact width.
+  /// On x86 this
   /// is the widest register enabled by the target features.
   unsigned getMinVectorRegisterBits() const;
 
-  /// Exact vector register width when established by the target description.
-  /// RISC-V ISA extensions currently provide only a lower bound, so this
-  /// returns std::nullopt even for a named CPU. On x86 the enabled register
-  /// width is exact. No exact width is inferred from a Zvl* extension.
+  /// Maximum vector register width allowed by the resolved target.
+  unsigned getMaxVectorRegisterBits() const;
+
+  /// Exact width when the resolved minimum and maximum agree.
+  /// An explicit cpu.vlen overrides the ISA range after validation.
   std::optional<unsigned> getExactVectorRegisterBits() const;
 
   /// The most registers one vector value may span: LMUL=8 on RISC-V, and
@@ -115,6 +117,7 @@ private:
   std::string chip;
   std::unique_ptr<llvm::RISCVISAInfo> isa;
   llvm::StringSet<> x86Features;
+  unsigned exactVLen = 0;
 };
 
 /// Reads the target of the module enclosing `op`. Emits an error at `op` and

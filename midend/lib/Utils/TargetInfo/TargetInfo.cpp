@@ -24,6 +24,7 @@
 
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/RISCVTargetParser.h"
 #include "llvm/TargetParser/Triple.h"
@@ -55,7 +56,7 @@ bool TargetInfo::hasVector() const {
 unsigned TargetInfo::getMinVectorRegisterBits() const {
   switch (arch) {
   case Arch::RISCV:
-    return isa->getMinVLen();
+    return exactVLen ? exactVLen : isa->getMinVLen();
   case Arch::X86:
     if (hasExtension("avx512f"))
       return 512;
@@ -66,11 +67,16 @@ unsigned TargetInfo::getMinVectorRegisterBits() const {
   llvm_unreachable("unknown target architecture");
 }
 
-std::optional<unsigned> TargetInfo::getExactVectorRegisterBits() const {
+unsigned TargetInfo::getMaxVectorRegisterBits() const {
   if (arch == Arch::RISCV)
-    return std::nullopt;
-  unsigned bits = getMinVectorRegisterBits();
-  return bits ? std::optional<unsigned>(bits) : std::nullopt;
+    return exactVLen ? exactVLen : isa->getMaxVLen();
+  return getMinVectorRegisterBits();
+}
+
+std::optional<unsigned> TargetInfo::getExactVectorRegisterBits() const {
+  unsigned min = getMinVectorRegisterBits();
+  return min && min == getMaxVectorRegisterBits() ? std::optional<unsigned>(min)
+                                                  : std::nullopt;
 }
 
 bool TargetInfo::supportsVectorElementType(Type type) const {
@@ -131,6 +137,7 @@ std::string TargetInfo::describe() const {
     break;
   }
   }
+  os << "max-vector-bits: " << getMaxVectorRegisterBits() << "\n";
   os << "exact-vector-bits: ";
   if (auto bits = getExactVectorRegisterBits())
     os << *bits;
@@ -193,8 +200,23 @@ static FailureOr<TargetInfo> getRISCVTargetInfo(Operation *op,
   if (!isa)
     return op->emitError() << "inconsistent target extensions: "
                            << llvm::toString(isa.takeError());
+  ModuleOp module = mlir::isa<ModuleOp>(op) ? cast<ModuleOp>(op)
+                                            : op->getParentOfType<ModuleOp>();
+  unsigned vlen = 0;
+  if (Attribute attr = module->getAttr("cpu.vlen")) {
+    auto value = dyn_cast<IntegerAttr>(attr);
+    if (!value || value.getValue().isNegative() ||
+        value.getValue().getActiveBits() > 32)
+      return op->emitError("cpu.vlen must be a non-negative 32-bit integer");
+    vlen = value.getValue().getZExtValue();
+    if (vlen && (vlen < 128 || !llvm::isPowerOf2_64(vlen)))
+      return op->emitError("cpu.vlen must be zero or a power of two >= 128");
+    if (vlen && (!(*isa)->hasExtension("zve32x") ||
+                 vlen < (*isa)->getMinVLen() || vlen > (*isa)->getMaxVLen()))
+      return op->emitError("cpu.vlen conflicts with the target VLEN range");
+  }
   return TargetInfo(triple.str(), chip.empty() ? "generic" : chip.str(),
-                    std::move(*isa));
+                    std::move(*isa), vlen);
 }
 
 static FailureOr<TargetInfo> getX86TargetInfo(Operation *op,
@@ -288,6 +310,10 @@ struct SetLLVMTargetPass
       llvm::cl::desc("Comma-separated +ext/-ext list (-mattr)"),
       llvm::cl::init("")};
 
+  Option<unsigned> vlen{
+      *this, "vlen", llvm::cl::desc("Exact RISC-V VLEN in bits (0: unknown)"),
+      llvm::cl::init(0)};
+
   void runOnOperation() override {
     MLIRContext *ctx = &getContext();
     SmallVector<StringRef> list;
@@ -298,6 +324,14 @@ struct SetLLVMTargetPass
         LLVM::TargetAttr::get(ctx, StringAttr::get(ctx, triple),
                               StringAttr::get(ctx, chip), featuresAttr);
     getOperation()->setAttr(LLVM::LLVMDialect::getTargetAttrName(), target);
+    if (vlen) {
+      if (!llvm::Triple(triple).isRISCV()) {
+        getOperation().emitError("vlen is only supported for RISC-V targets");
+        return signalPassFailure();
+      }
+      getOperation()->setAttr(
+          "cpu.vlen", IntegerAttr::get(IntegerType::get(ctx, 32), vlen));
+    }
     if (failed(getTargetInfo(getOperation())))
       signalPassFailure();
   }

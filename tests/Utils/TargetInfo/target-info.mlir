@@ -12,6 +12,7 @@
 // CHECK-NEXT: elen: 64
 // CHECK-NEXT: elen-fp: 64
 // CHECK-NEXT: isa: {{.*}}_zvfh1p0{{.*}}_zvl256b1p0{{.*}}_xsmtvdot1p0
+// CHECK-NEXT: max-vector-bits: 65536
 // CHECK-NEXT: exact-vector-bits: unknown
 // CHECK-NEXT: elements i8: m1=32 m8=256
 // CHECK-NEXT: elements i32: m1=8 m8=64
@@ -88,6 +89,7 @@ module attributes {llvm.target = #llvm.target<triple = "riscv64-unknown-linux-gn
 // CHECK-NEXT: vector: yes
 // CHECK-NEXT: vector-bits: 512
 // CHECK-NEXT: features: {{.*}}avx512f
+// CHECK-NEXT: max-vector-bits: 512
 // CHECK-NEXT: exact-vector-bits: 512
 // CHECK-NEXT: elements i8: m1=64 m8=512
 // CHECK-NEXT: elements i32: m1=16 m8=128
