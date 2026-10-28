@@ -30,7 +30,8 @@
 //     the row extracts and inserts step 1 leaves) and scf.for iter_args are
 //     linearized. `vector.contract` and `vector.transpose`, which the
 //     linearizer does not cover, keep their n-D types with shape_casts at
-//     the boundary, for their own lowerings.
+//     the boundary, for their own lowerings. `cpu.sched_barrier` holds the
+//     flattened values.
 //
 //===----------------------------------------------------------------------===//
 
@@ -45,9 +46,26 @@
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
+#include "Dialect/Cpu/CpuDialect.h"
+#include "Dialect/Cpu/CpuOps.h"
+
 using namespace mlir;
 
 namespace {
+
+/// cpu.sched_barrier on n-D vectors holds their flattened forms.
+struct LinearizeSchedBarrier
+    : OpConversionPattern<::buddy::cpu::SchedBarrierOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(::buddy::cpu::SchedBarrierOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOpWithNewOp<::buddy::cpu::SchedBarrierOp>(
+        op, adaptor.getInputs(), op.getMemoryAttr());
+    return success();
+  }
+};
 
 class FlattenVectorTilesPass
     : public PassWrapper<FlattenVectorTilesPass, OperationPass<func::FuncOp>> {
@@ -81,6 +99,9 @@ public:
     RewritePatternSet linearize(ctx);
     vector::populateForVectorLinearize(converter, target);
     target.addLegalOp<vector::ContractionOp, vector::TransposeOp>();
+    target.addDynamicallyLegalOp<::buddy::cpu::SchedBarrierOp>(
+        [&](Operation *op) { return converter.isLegal(op); });
+    linearize.add<LinearizeSchedBarrier>(converter, ctx);
     vector::populateVectorLinearizeBasePatterns(converter, target, linearize);
     vector::populateVectorLinearizeShuffleLikeOpsPatterns(converter, target,
                                                           linearize);

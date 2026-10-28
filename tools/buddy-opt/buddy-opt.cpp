@@ -57,6 +57,8 @@
 #include "Dialect/Buckyball/BuckyballDialect.h"
 #include "Dialect/Buckyball/BuckyballOps.h"
 #endif
+#include "Cpu/CpuDialect.h"
+#include "Cpu/CpuOps.h"
 #include "GPU/TransformOps.h"
 #include "Gemmini/GemminiDialect.h"
 #include "Gemmini/GemminiOps.h"
@@ -142,6 +144,7 @@ void registerEliminateMemRefCopyPass();
 void registerConvertTileTensorToVectorPass();
 void registerFlattenVectorTilesPass();
 void registerLowerVectorContractToIMETilePass();
+void registerLowerCpuSchedBarrierPass();
 void registerEliminateLargeZeroConstantsPass();
 void registerConvertTraceToLLVMPass();
 } // namespace buddy
@@ -211,6 +214,7 @@ int main(int argc, char **argv) {
   mlir::buddy::registerConvertTileTensorToVectorPass();
   mlir::buddy::registerFlattenVectorTilesPass();
   mlir::buddy::registerLowerVectorContractToIMETilePass();
+  mlir::buddy::registerLowerCpuSchedBarrierPass();
   mlir::buddy::registerStaticizeMemRefLayoutPass();
   mlir::buddy::registerMatMulTransposeBVecPass();
   mlir::buddy::registerMatMulTransposeBVecDecodePass();
@@ -251,7 +255,7 @@ int main(int argc, char **argv) {
                   buddy::ame::AMEDialect,
                   buddy::tile::TileDialect,
                   buddy::trace::BuddyTraceDialect,
-                  buddy::ime::IMEDialect>();
+                  buddy::ime::IMEDialect, buddy::cpu::CpuDialect>();
   // clang-format on
 #ifdef BUDDY_EXTERNAL_DIALECTS
   registry.insert<buddy::buckyball::BuckyballDialect>();

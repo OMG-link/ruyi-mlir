@@ -1,6 +1,7 @@
 add_mlir_library(FlattenVectorTilesPass
   FlattenVectorTiles.cpp
   LINK_LIBS PUBLIC
+    BuddyCpu
     MLIRArithDialect
     MLIRFuncDialect
     MLIRIR

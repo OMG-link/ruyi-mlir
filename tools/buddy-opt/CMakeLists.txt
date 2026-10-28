@@ -54,6 +54,7 @@ target_link_libraries(buddy-opt
   LowerLinalgToGemminiPass
   LowerLinalgToIMEPass
   BuddyIME
+  BuddyCpu
   BuddyIMETransforms
   LowerIMEPass
   BuddyAME
@@ -79,6 +80,7 @@ target_link_libraries(buddy-opt
   ConvertTileTensorToVectorPass
   FlattenVectorTilesPass
   LowerVectorContractToIMETilePass
+  LowerCpuSchedBarrierPass
   StaticizeMemRefLayoutPass
   EliminateMemRefCopyPass
   EliminateLargeZeroConstants

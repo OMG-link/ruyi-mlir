@@ -39,6 +39,11 @@
 //   elementwise linalg.generic          its body on vectors
 //   tensor.expand/collapse_shape        vector.shape_cast
 //   scf.for iter_args                   vector iter_args
+//   cpu.sched_barrier                   cpu.sched_barrier on vectors
+//
+// A `cpu.sched_barrier` operand joins its result. The barrier exists to hold
+// values in registers, so an operand whose component stays in tensors is an
+// error.
 //
 // With `contract-k1-tiles`, `linalg.matmul(A, linalg.transpose(B))` of the
 // SpacemiT K1 IME tile shape (4x8 int8 by 8x4 int8 into 4x4 int32, on a
@@ -74,6 +79,8 @@
 #include "mlir/IR/Remarks.h"
 #include "mlir/Pass/Pass.h"
 
+#include "Dialect/Cpu/CpuDialect.h"
+#include "Dialect/Cpu/CpuOps.h"
 #include "Utils/TargetInfo.h"
 
 #include "llvm/ADT/DenseMap.h"
@@ -242,7 +249,8 @@ public:
   }
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<arith::ArithDialect, memref::MemRefDialect,
-                    vector::VectorDialect, tensor::TensorDialect>();
+                    vector::VectorDialect, tensor::TensorDialect,
+                    ::buddy::cpu::CpuDialect>();
   }
 
   void runOnOperation() override;
@@ -422,6 +430,12 @@ void ConvertTileTensorToVectorPass::analyze(
       return;
     } else if (isa<tensor::ExpandShapeOp, tensor::CollapseShapeOp>(op)) {
       uniteAll({op->getOperand(0), op->getResult(0)});
+      return;
+    } else if (auto barrier = dyn_cast<::buddy::cpu::SchedBarrierOp>(op)) {
+      for (auto [in, out] :
+           llvm::zip(barrier.getInputs(), barrier.getResults()))
+        if (isTensor(in))
+          uniteAll({in, out});
       return;
     } else if (auto forOp = dyn_cast<scf::ForOp>(op)) {
       auto yield = cast<scf::YieldOp>(forOp.getBody()->getTerminator());
@@ -634,6 +648,21 @@ void ConvertTileTensorToVectorPass::rewriteOp(OpBuilder &b, Operation *op) {
     toErase.push_back(op);
     return;
   }
+  if (auto barrier = dyn_cast<::buddy::cpu::SchedBarrierOp>(op)) {
+    SmallVector<Value> inputs;
+    for (Value v : barrier.getInputs())
+      inputs.push_back(isTensor(v) ? lookup(b, v) : v);
+    auto vec = ::buddy::cpu::SchedBarrierOp::create(b, loc, inputs,
+                                                    barrier.getMemoryAttr());
+    for (auto [res, nres] : llvm::zip(barrier.getResults(), vec.getResults())) {
+      if (isTensor(res))
+        mapping.map(res, nres);
+      else
+        res.replaceAllUsesWith(nres);
+    }
+    toErase.push_back(op);
+    return;
+  }
   if (auto forOp = dyn_cast<scf::ForOp>(op)) {
     for (auto [i, init] : llvm::enumerate(forOp.getInitArgs())) {
       BlockArgument arg = forOp.getRegionIterArgs()[i];
@@ -748,6 +777,23 @@ void ConvertTileTensorToVectorPass::runOnOperation() {
                          size);
     }
   }
+
+  // A barrier whose tensor operand stays in memory cannot do its job.
+  bool barrierBlocked = false;
+  func.walk([&](::buddy::cpu::SchedBarrierOp barrier) {
+    for (Value v : barrier.getInputs()) {
+      if (!isTensor(v) || isConverted(v))
+        continue;
+      auto it = blocked.find(find(v));
+      InFlightDiagnostic diag = barrier.emitError(
+          "sched_barrier operand cannot be held in vector registers");
+      if (it != blocked.end())
+        diag << ": " << it->second.second;
+      barrierBlocked = true;
+    }
+  });
+  if (barrierBlocked)
+    return signalPassFailure();
 
   rewrite(func);
 }
