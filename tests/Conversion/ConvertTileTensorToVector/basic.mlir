@@ -1,4 +1,5 @@
 // RUN: buddy-opt %s -set-llvm-target="chip=spacemit-x60" -convert-tile-tensor-to-vector -canonicalize -split-input-file | FileCheck %s
+// RUN: buddy-opt %s -set-llvm-target="chip=spacemit-x60" -convert-tile-tensor-to-vector -split-input-file | FileCheck %s --check-prefix=IF
 // RUN: buddy-opt %s -set-llvm-target="triple=x86_64-unknown-linux-gnu chip=x86-64" -convert-tile-tensor-to-vector -canonicalize -split-input-file | FileCheck %s
 // RUN: buddy-opt %s -set-llvm-target="chip=spacemit-x60" -convert-tile-tensor-to-vector -split-input-file -remarks-filter=tile-to-vector -o /dev/null 2>&1 | FileCheck %s --check-prefix=REMARK
 // RUN: not buddy-opt %s -convert-tile-tensor-to-vector -split-input-file -o /dev/null 2>&1 | FileCheck %s --check-prefix=NOTARGET
@@ -90,6 +91,85 @@ func.func @loop(%src: memref<16xf32>, %dst: memref<16xf32>) {
     scf.yield %s : tensor<16xf32>
   }
   bufferization.materialize_in_destination %res in writable %dst : (tensor<16xf32>, memref<16xf32>) -> ()
+  return
+}
+
+// Tensor results from both scf.if branches become vectors. Scalar results
+// retain their original type, and nested if/for yields are rewritten too.
+// IF-LABEL: func.func @if_result
+// IF: %[[IF:.+]]:2 = scf.if {{.*}} -> (vector<16xf32>, i32)
+// IF: scf.yield {{.*}} : vector<16xf32>, i32
+// IF: scf.yield {{.*}} : vector<16xf32>, i32
+// IF: vector.transfer_write {{.*}} : vector<16xf32>, memref<16xf32>
+func.func @if_result(%cond: i1, %inner_cond: i1, %src: memref<16xf32>, %dst: memref<16xf32>) {
+  %z = arith.constant 0.0 : f32
+  %e = tensor.empty() : tensor<16xf32>
+  %a = linalg.fill ins(%z : f32) outs(%e : tensor<16xf32>) -> tensor<16xf32>
+  %b = bufferization.to_tensor %src restrict : memref<16xf32> to tensor<16xf32>
+  %result, %scalar = scf.if %cond -> (tensor<16xf32>, i32) {
+    %nested = scf.if %inner_cond -> tensor<16xf32> {
+      scf.yield %a : tensor<16xf32>
+    } else {
+      scf.yield %b : tensor<16xf32>
+    }
+    %c1 = arith.constant 1 : i32
+    scf.yield %nested, %c1 : tensor<16xf32>, i32
+  } else {
+    %c2 = arith.constant 2 : i32
+    scf.yield %b, %c2 : tensor<16xf32>, i32
+  }
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c3 = arith.constant 3 : index
+  %loop = scf.for %i = %c0 to %c3 step %c1 iter_args(%carry = %result) -> (tensor<16xf32>) {
+    scf.yield %carry : tensor<16xf32>
+  }
+  bufferization.materialize_in_destination %loop in writable %dst : (tensor<16xf32>, memref<16xf32>) -> ()
+  return
+}
+
+// If one yielded value belongs to a blocked component, the tensor result
+// remains a tensor on both paths.
+// IF-LABEL: func.func @if_blocked
+// IF: %[[RES:.+]] = scf.if {{.*}} -> (tensor<4x4xf32>)
+// IF: bufferization.materialize_in_destination %[[RES]]
+func.func @if_blocked(%cond: i1, %a: memref<4x4xf32>, %b: memref<4x4xf32>, %dst: memref<4x4xf32>) {
+  %e = tensor.empty() : tensor<4x4xf32>
+  %z = arith.constant 0.0 : f32
+  %init = linalg.fill ins(%z : f32) outs(%e : tensor<4x4xf32>) -> tensor<4x4xf32>
+  %ta = bufferization.to_tensor %a restrict : memref<4x4xf32> to tensor<4x4xf32>
+  %tb = bufferization.to_tensor %b restrict : memref<4x4xf32> to tensor<4x4xf32>
+  %mat = linalg.matmul ins(%ta, %tb : tensor<4x4xf32>, tensor<4x4xf32>) outs(%init : tensor<4x4xf32>) -> tensor<4x4xf32>
+  %res = scf.if %cond -> tensor<4x4xf32> {
+    scf.yield %init : tensor<4x4xf32>
+  } else {
+    scf.yield %mat : tensor<4x4xf32>
+  }
+  bufferization.materialize_in_destination %res in writable %dst : (tensor<4x4xf32>, memref<4x4xf32>) -> ()
+  return
+}
+
+// Independent results of one if can make independent conversion decisions.
+// IF-LABEL: func.func @if_mixed_components
+// IF: scf.if {{.*}} -> (vector<16xf32>, tensor<4x4xf32>)
+// IF: vector.transfer_write {{.*}} : vector<16xf32>, memref<16xf32>
+// IF: bufferization.materialize_in_destination {{.*}} : (tensor<4x4xf32>, memref<4x4xf32>)
+func.func @if_mixed_components(%cond: i1, %a: memref<4x4xf32>, %b: memref<4x4xf32>, %small_dst: memref<4x4xf32>, %large_dst: memref<16xf32>) {
+  %zero = arith.constant 0.0 : f32
+  %large_empty = tensor.empty() : tensor<16xf32>
+  %large = linalg.fill ins(%zero : f32) outs(%large_empty : tensor<16xf32>) -> tensor<16xf32>
+  %small_empty = tensor.empty() : tensor<4x4xf32>
+  %small_init = linalg.fill ins(%zero : f32) outs(%small_empty : tensor<4x4xf32>) -> tensor<4x4xf32>
+  %ta = bufferization.to_tensor %a restrict : memref<4x4xf32> to tensor<4x4xf32>
+  %tb = bufferization.to_tensor %b restrict : memref<4x4xf32> to tensor<4x4xf32>
+  %mat = linalg.matmul ins(%ta, %tb : tensor<4x4xf32>, tensor<4x4xf32>) outs(%small_init : tensor<4x4xf32>) -> tensor<4x4xf32>
+  %good, %bad = scf.if %cond -> (tensor<16xf32>, tensor<4x4xf32>) {
+    scf.yield %large, %small_init : tensor<16xf32>, tensor<4x4xf32>
+  } else {
+    scf.yield %large, %mat : tensor<16xf32>, tensor<4x4xf32>
+  }
+  bufferization.materialize_in_destination %good in writable %large_dst : (tensor<16xf32>, memref<16xf32>) -> ()
+  bufferization.materialize_in_destination %bad in writable %small_dst : (tensor<4x4xf32>, memref<4x4xf32>) -> ()
   return
 }
 

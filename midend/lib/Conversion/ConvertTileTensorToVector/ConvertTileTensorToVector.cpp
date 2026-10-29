@@ -26,12 +26,13 @@
 //
 // Tensor values are grouped into connected components by union-find: a
 // convertible op joins all the tensor values it reads (that matter) and
-// produces, and `scf.for` joins, per iter_arg, the init, region argument,
-// yield operand and result. A component converts only when every value in it
-// is legal (static shape, a vector element type of the target, and at most
-// one 8-register group) and no op touching it is a blocker. Converting a
-// component never introduces a vector<->tensor conversion, so a component is
-// converted entirely or not at all.
+// produces. `scf.for` joins, per iter_arg, the init, region argument, yield
+// operand and result; `scf.if` joins each result with the matching yield from
+// both branches. A component converts only when every value in it is legal
+// (static shape, a vector element type of the target, and at most one
+// 8-register group) and no op touching it is a blocker. Converting a component
+// never introduces a vector<->tensor conversion, so a component is converted
+// entirely or not at all.
 //
 //   bufferization.to_tensor             vector.transfer_read
 //   bufferization.materialize_in_dest.  vector.transfer_write
@@ -39,6 +40,7 @@
 //   elementwise linalg.generic          its body on vectors
 //   tensor.expand/collapse_shape        vector.shape_cast
 //   scf.for iter_args                   vector iter_args
+//   scf.if tensor results               vector results and yields
 //   cpu.sched_barrier                   cpu.sched_barrier on vectors
 //
 // A `cpu.sched_barrier` operand joins its result. The barrier exists to hold
@@ -446,8 +448,23 @@ void ConvertTileTensorToVectorPass::analyze(
                   yield.getOperand(i)});
       }
       return;
+    } else if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
+      // Each result is selected from the corresponding yield in either
+      // branch. Join all of those values so the result can only convert when
+      // both branches (and everything feeding them) are legal.
+      for (auto [i, result] : llvm::enumerate(ifOp.getResults())) {
+        if (!isTensor(result))
+          continue;
+        SmallVector<Value> values{result};
+        for (Region &region : ifOp->getRegions()) {
+          auto yield = cast<scf::YieldOp>(region.front().getTerminator());
+          values.push_back(yield.getOperand(i));
+        }
+        uniteAll(values);
+      }
+      return;
     } else if (auto yield = dyn_cast<scf::YieldOp>(op)) {
-      if (isa<scf::ForOp>(op->getParentOp()))
+      if (isa<scf::ForOp, scf::IfOp>(op->getParentOp()))
         return;
     } else if (op->hasTrait<OpTrait::Elementwise>() &&
                op->getNumRegions() == 0 && op->getNumResults() > 0 &&
@@ -666,9 +683,10 @@ void ConvertTileTensorToVectorPass::rewriteOp(OpBuilder &b, Operation *op) {
   if (auto forOp = dyn_cast<scf::ForOp>(op)) {
     for (auto [i, init] : llvm::enumerate(forOp.getInitArgs())) {
       BlockArgument arg = forOp.getRegionIterArgs()[i];
-      if (!isTensor(init) || !isConverted(arg))
+      if (!isTensor(arg) || !isConverted(arg))
         continue;
-      Value vInit = lookup(b, init);
+      // An earlier scf.if may already have retagged this init to a vector.
+      Value vInit = isTensor(init) ? lookup(b, init) : init;
       forOp.getInitArgsMutable()[i].set(vInit);
       VectorType vecTy = vectorType(arg.getType());
       arg.setType(vecTy);
@@ -678,13 +696,25 @@ void ConvertTileTensorToVectorPass::rewriteOp(OpBuilder &b, Operation *op) {
     }
     return;
   }
+  if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
+    for (auto [i, result] : llvm::enumerate(ifOp.getResults())) {
+      if (!isTensor(result) || !isConverted(result))
+        continue;
+      result.setType(vectorType(result.getType()));
+      mapping.map(result, result);
+    }
+    return;
+  }
   if (auto yield = dyn_cast<scf::YieldOp>(op)) {
-    auto forOp = dyn_cast<scf::ForOp>(op->getParentOp());
-    if (!forOp)
-      return;
-    for (auto [i, arg] : llvm::enumerate(forOp.getRegionIterArgs()))
-      if (isa<VectorType>(arg.getType()) && isTensor(yield.getOperand(i)))
-        yield->setOperand(i, lookup(b, yield.getOperand(i)));
+    if (auto forOp = dyn_cast<scf::ForOp>(op->getParentOp())) {
+      for (auto [i, arg] : llvm::enumerate(forOp.getRegionIterArgs()))
+        if (isa<VectorType>(arg.getType()) && isTensor(yield.getOperand(i)))
+          yield->setOperand(i, lookup(b, yield.getOperand(i)));
+    } else if (auto ifOp = dyn_cast<scf::IfOp>(op->getParentOp())) {
+      for (auto [i, result] : llvm::enumerate(ifOp.getResults()))
+        if (isa<VectorType>(result.getType()) && isTensor(yield.getOperand(i)))
+          yield->setOperand(i, lookup(b, yield.getOperand(i)));
+    }
     return;
   }
   if (op->hasTrait<OpTrait::Elementwise>() && op->getNumResults() > 0 &&
