@@ -39,7 +39,7 @@ module attributes {llvm.target = #llvm.target<triple = "riscv64-unknown-linux-gn
 // remove an extension the chip has.
 // CHECK-LABEL: chip: generic
 // CHECK: min-vlen: 512
-// CHECK: elements f16: m1=0 m8=0
+// CHECK: elements f16: m1=32 m8=256
 module attributes {llvm.target = #llvm.target<triple = "riscv64-unknown-linux-gnu", chip = "generic", features = #llvm.target_features<["+m", "+f", "+d", "+v", "+zvl512b"]>>} {
 }
 
@@ -49,7 +49,7 @@ module attributes {llvm.target = #llvm.target<triple = "riscv64-unknown-linux-gn
 // CHECK: isa:
 // CHECK-NOT: xsmtvdot
 // CHECK-SAME: {{$}}
-// CHECK: elements f16: m1=0 m8=0
+// CHECK: elements f16: m1=16 m8=128
 module attributes {llvm.target = #llvm.target<triple = "riscv64-unknown-linux-gnu", chip = "spacemit-x60", features = #llvm.target_features<["-xsmtvdot", "-zvfh"]>>} {
 }
 
@@ -94,7 +94,7 @@ module attributes {llvm.target = #llvm.target<triple = "riscv64-unknown-linux-gn
 // CHECK-NEXT: elements i8: m1=64 m8=512
 // CHECK-NEXT: elements i32: m1=16 m8=128
 // CHECK-NEXT: elements i64: m1=8 m8=64
-// CHECK-NEXT: elements f16: m1=0 m8=0
+// CHECK-NEXT: elements f16: m1=32 m8=256
 // CHECK-NEXT: elements f32: m1=16 m8=128
 // CHECK-NEXT: elements bf16: m1=0 m8=0
 module attributes {llvm.target = #llvm.target<triple = "x86_64-unknown-linux-gnu", chip = "icelake-server">} {
@@ -115,6 +115,7 @@ module attributes {llvm.target = #llvm.target<triple = "x86_64-unknown-linux-gnu
 // "generic" is the triple's baseline, SSE2 for x86-64.
 // CHECK-LABEL: chip: generic
 // CHECK: vector-bits: 128
+// CHECK: elements f16: m1=8 m8=64
 module attributes {llvm.target = #llvm.target<triple = "x86_64-unknown-linux-gnu", chip = "generic">} {
 }
 

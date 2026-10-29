@@ -14,8 +14,10 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMAttrs.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Pass/Pass.h"
@@ -79,7 +81,7 @@ std::optional<unsigned> TargetInfo::getExactVectorRegisterBits() const {
                                                   : std::nullopt;
 }
 
-bool TargetInfo::supportsVectorElementType(Type type) const {
+bool TargetInfo::canHoldVectorElementType(Type type) const {
   if (!hasVector())
     return false;
   if (auto intType = dyn_cast<IntegerType>(type)) {
@@ -91,24 +93,168 @@ bool TargetInfo::supportsVectorElementType(Type type) const {
   switch (arch) {
   case Arch::RISCV:
     if (type.isF16())
-      return isa->hasExtension("zvfh");
+      return true;
     if (type.isF32() || type.isF64())
-      return type.getIntOrFloatBitWidth() <= isa->getMaxELenFp();
-    // bf16 has only conversions (Zvfbfmin) and widening FMA (Zvfbfwma), and
-    // i1 lives in mask registers; neither is a general vector element type.
+      return type.getIntOrFloatBitWidth() <= isa->getMaxELen();
+    // bf16 has specialized operations outside this pipeline's type policy.
     return false;
   case Arch::X86:
     if (type.isF16())
-      return hasExtension("avx512fp16");
+      return true;
     // SSE2 covers f32 and f64. bf16 has only conversions and dot products.
     return type.isF32() || type.isF64();
   }
   llvm_unreachable("unknown target architecture");
 }
 
+/// Element type of a scalar or shaped value.
+static Type getElementType(Type type) {
+  if (auto shaped = dyn_cast<ShapedType>(type))
+    return shaped.getElementType();
+  return type;
+}
+
+/// Validate data element types while allowing only compare results and select
+/// conditions to use the i1 mask representation.
+static bool hasSupportedVectorElementTypes(Operation *op,
+                                           const TargetInfo &target) {
+  for (auto [index, operand] : llvm::enumerate(op->getOperands())) {
+    Type type = getElementType(operand.getType());
+    if (type.isInteger(1) && mlir::isa<arith::SelectOp>(op) && index == 0)
+      continue;
+    if (type.isInteger(1) || !target.canHoldVectorElementType(type))
+      return false;
+  }
+  for (Type result : op->getResultTypes()) {
+    Type type = getElementType(result);
+    if (type.isInteger(1) && mlir::isa<arith::CmpIOp, arith::CmpFOp>(op))
+      continue;
+    if (type.isInteger(1) || !target.canHoldVectorElementType(type))
+      return false;
+  }
+  return true;
+}
+
+static bool containsF16(Operation *op) {
+  return llvm::any_of(op->getOperandTypes(),
+                      [](Type type) { return getElementType(type).isF16(); }) ||
+         llvm::any_of(op->getResultTypes(),
+                      [](Type type) { return getElementType(type).isF16(); });
+}
+
+static bool isF16F32Conversion(Operation *op) {
+  auto isHalfOrFloat = [](Type type) {
+    Type elementType = getElementType(type);
+    return elementType.isF16() || elementType.isF32();
+  };
+  return llvm::all_of(op->getOperandTypes(), isHalfOrFloat) &&
+         llvm::all_of(op->getResultTypes(), isHalfOrFloat);
+}
+
+bool TargetInfo::supportsVectorOperation(Operation *op) const {
+  if (!hasVector())
+    return false;
+  switch (arch) {
+  case Arch::RISCV:
+    return supportsRISCVVectorOperation(op);
+  case Arch::X86:
+    return supportsX86VectorOperation(op);
+  }
+  llvm_unreachable("unknown target architecture");
+}
+
+bool TargetInfo::supportsRISCVVectorOperation(Operation *op) const {
+  if (!hasSupportedVectorElementTypes(op, *this))
+    return false;
+
+  // Select moves values and a mask; it does not need an FP vector extension.
+  if (mlir::isa<arith::SelectOp>(op))
+    return true;
+
+  // Integer arithmetic, comparisons, bit operations, shifts, and casts.
+  if (mlir::isa<arith::AddIOp, arith::SubIOp, arith::MulIOp, arith::AndIOp,
+                arith::OrIOp, arith::XOrIOp, arith::ShLIOp, arith::ShRSIOp,
+                arith::ShRUIOp, arith::CmpIOp, arith::ExtSIOp, arith::ExtUIOp,
+                arith::TruncIOp>(op))
+    return true;
+
+  auto hasSupportedFPWidths = [&] {
+    auto supported = [&](Type type) {
+      type = getElementType(type);
+      return (!type.isF32() && !type.isF64()) ||
+             type.getIntOrFloatBitWidth() <= isa->getMaxELenFp();
+    };
+    return llvm::all_of(op->getOperandTypes(), supported) &&
+           llvm::all_of(op->getResultTypes(), supported);
+  };
+
+  // Zvfhmin permits only f16<->f32 conversions; f16<->f64 and f16<->integer
+  // remain outside the conversion-only capability.
+  if (mlir::isa<arith::ExtFOp, arith::TruncFOp>(op)) {
+    if (!hasSupportedFPWidths())
+      return false;
+    return !containsF16(op) ||
+           (isF16F32Conversion(op) &&
+            (isa->hasExtension("zvfhmin") || isa->hasExtension("zvfh")));
+  }
+
+  // Integer/floating conversions involving f16 require Zvfh.
+  if (mlir::isa<arith::SIToFPOp, arith::UIToFPOp, arith::FPToSIOp,
+                arith::FPToUIOp>(op))
+    return hasSupportedFPWidths() &&
+           (!containsF16(op) || isa->hasExtension("zvfh"));
+
+  // f16 arithmetic, FMA, and comparison require Zvfh; wider formats use
+  // ELEN-FP as checked above.
+  if (mlir::isa<arith::AddFOp, arith::SubFOp, arith::MulFOp, arith::DivFOp,
+                arith::MaximumFOp, arith::MinimumFOp, arith::MaxNumFOp,
+                arith::MinNumFOp, arith::NegFOp, arith::CmpFOp, math::FmaOp>(
+          op))
+    return hasSupportedFPWidths() &&
+           (!containsF16(op) || isa->hasExtension("zvfh"));
+  return false;
+}
+
+bool TargetInfo::supportsX86VectorOperation(Operation *op) const {
+  if (!hasSupportedVectorElementTypes(op, *this))
+    return false;
+
+  // Select is data movement and does not need AVX512FP16 arithmetic.
+  if (mlir::isa<arith::SelectOp>(op))
+    return true;
+
+  // Integer arithmetic, comparisons, bit operations, shifts, and casts.
+  if (mlir::isa<arith::AddIOp, arith::SubIOp, arith::MulIOp, arith::AndIOp,
+                arith::OrIOp, arith::XOrIOp, arith::ShLIOp, arith::ShRSIOp,
+                arith::ShRUIOp, arith::CmpIOp, arith::ExtSIOp, arith::ExtUIOp,
+                arith::TruncIOp>(op))
+    return true;
+
+  // F16C and AVX512F allow f16<->f32 conversion; AVX512FP16 also allows it.
+  if (mlir::isa<arith::ExtFOp, arith::TruncFOp>(op))
+    return !containsF16(op) ||
+           (isF16F32Conversion(op) &&
+            (hasExtension("f16c") || hasExtension("avx512f") ||
+             hasExtension("avx512fp16")));
+
+  // Integer/floating conversions involving f16 require AVX512FP16.
+  if (mlir::isa<arith::SIToFPOp, arith::UIToFPOp, arith::FPToSIOp,
+                arith::FPToUIOp>(op))
+    return !containsF16(op) || hasExtension("avx512fp16");
+
+  // f32/f64 arithmetic is admitted; f16 arithmetic/FMA/comparison requires
+  // AVX512FP16.
+  if (mlir::isa<arith::AddFOp, arith::SubFOp, arith::MulFOp, arith::DivFOp,
+                arith::MaximumFOp, arith::MinimumFOp, arith::MaxNumFOp,
+                arith::MinNumFOp, arith::NegFOp, arith::CmpFOp, math::FmaOp>(
+          op))
+    return !containsF16(op) || hasExtension("avx512fp16");
+  return false;
+}
+
 unsigned TargetInfo::getRegisterGroupElements(Type type,
                                               unsigned registers) const {
-  if (!supportsVectorElementType(type) || registers == 0 ||
+  if (!canHoldVectorElementType(type) || registers == 0 ||
       registers > kMaxGroupRegisters)
     return 0;
   return getMinVectorRegisterBits() * registers / type.getIntOrFloatBitWidth();

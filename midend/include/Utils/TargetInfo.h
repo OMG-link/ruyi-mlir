@@ -98,12 +98,18 @@ public:
   /// consecutive registers.
   static constexpr unsigned kMaxGroupRegisters = 8;
 
-  /// True when vector instructions operate on elements of `type`.
-  bool supportsVectorElementType(Type type) const;
+  /// True when this pipeline represents `type` in a vector register for
+  /// capacity/movement decisions. This does not imply arithmetic support.
+  bool canHoldVectorElementType(Type type) const;
+
+  /// True for generic vector operations admitted by project policy. Checks
+  /// the operation kind and every operand/result element type, including
+  /// mixed-type conversions; LLVM may split or legalize the operations.
+  bool supportsVectorOperation(Operation *op) const;
 
   /// Elements of `type` guaranteed to fit in `registers` vector registers
   /// using the minimum register width,
-  /// or 0 when the type is not a supported vector element type.
+  /// or 0 when the type cannot be represented in vector registers.
   unsigned
   getRegisterGroupElements(Type type,
                            unsigned registers = kMaxGroupRegisters) const;
@@ -112,6 +118,9 @@ public:
   std::string describe() const;
 
 private:
+  bool supportsRISCVVectorOperation(Operation *op) const;
+  bool supportsX86VectorOperation(Operation *op) const;
+
   Arch arch;
   std::string triple;
   std::string chip;

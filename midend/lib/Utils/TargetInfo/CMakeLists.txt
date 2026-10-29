@@ -5,5 +5,7 @@ add_mlir_library(BuddyTargetInfo
   LLVMTargetParser
   MLIRIR
   MLIRLLVMDialect
+  MLIRArithDialect
+  MLIRMathDialect
   MLIRPass
   )

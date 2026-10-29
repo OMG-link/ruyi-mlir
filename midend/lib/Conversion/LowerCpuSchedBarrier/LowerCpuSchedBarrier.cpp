@@ -33,6 +33,7 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Pass/Pass.h"
@@ -57,6 +58,10 @@ Type getRegisterType(VectorType ty, const mlir::buddy::TargetInfo &target,
     return {};
   }
   int64_t bits = ty.getNumElements() * ty.getElementTypeBitWidth();
+  if (!target.canHoldVectorElementType(ty.getElementType())) {
+    reason = "element type cannot be represented in vector registers";
+    return {};
+  }
   switch (target.getArch()) {
   case mlir::buddy::TargetInfo::Arch::RISCV: {
     // A group of LMUL registers holds LMUL * VLEN bits; LMUL is a power of
@@ -67,8 +72,7 @@ Type getRegisterType(VectorType ty, const mlir::buddy::TargetInfo &target,
       return {};
     }
     int64_t vlen = *exactVLen;
-    if (bits * 8 < vlen || bits > 8 * vlen || !llvm::isPowerOf2_64(bits) ||
-        !target.supportsVectorElementType(ty.getElementType())) {
+    if (bits * 8 < vlen || bits > 8 * vlen || !llvm::isPowerOf2_64(bits)) {
       reason = ("operand of " + Twine(bits) +
                 " bits does not fill one register group at VLEN " + Twine(vlen))
                    .str();
@@ -100,6 +104,24 @@ Type getRegisterType(VectorType ty, const mlir::buddy::TargetInfo &target,
   llvm_unreachable("unknown target architecture");
 }
 
+/// LLVM inline-asm register constraints may not accept floating vector types
+/// that lack target vector arithmetic support. Preserve their bits through an
+/// integer carrier of the same width, then bitcast back after the barrier.
+static VectorType getBarrierCarrierType(VectorType ty,
+                                        const mlir::buddy::TargetInfo &target) {
+  Type elementType = ty.getElementType();
+  unsigned width = elementType.getIntOrFloatBitWidth();
+  bool unsupportedFloatRegisterType =
+      target.getArch() == mlir::buddy::TargetInfo::Arch::RISCV &&
+      (elementType.isF32() || elementType.isF64()) &&
+      width > target.getISAInfo().getMaxELenFp();
+  if (!elementType.isF16() && !unsupportedFloatRegisterType)
+    return ty;
+  return VectorType::get(ty.getShape(),
+                         IntegerType::get(ty.getContext(), width),
+                         ty.getScalableDims());
+}
+
 class LowerCpuSchedBarrierPass
     : public PassWrapper<LowerCpuSchedBarrierPass,
                          OperationPass<func::FuncOp>> {
@@ -111,7 +133,7 @@ public:
            "registers";
   }
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<LLVM::LLVMDialect>();
+    registry.insert<LLVM::LLVMDialect, vector::VectorDialect>();
   }
 
   void runOnOperation() override {
@@ -140,13 +162,18 @@ public:
           op.emitError("cannot hold operand in registers: ") << reason;
           return signalPassFailure();
         }
-        if (regTy != ty) {
-          Value undef = LLVM::PoisonOp::create(b, loc, regTy);
+        auto carrierTy = getBarrierCarrierType(ty, *target);
+        auto regCarrierTy =
+            getBarrierCarrierType(cast<VectorType>(regTy), *target);
+        if (carrierTy != ty)
+          v = vector::BitCastOp::create(b, loc, carrierTy, v);
+        if (regCarrierTy != carrierTy) {
+          Value undef = LLVM::PoisonOp::create(b, loc, regCarrierTy);
           v = LLVM::vector_insert::create(b, loc, undef, v,
                                           b.getI64IntegerAttr(0));
         }
         operands.push_back(v);
-        regTypes.push_back(regTy);
+        regTypes.push_back(regCarrierTy);
       }
 
       // "=reg,...,0,1,...": every operand comes back in the
@@ -182,9 +209,13 @@ public:
                 : LLVM::ExtractValueOp::create(b, loc, asmOp.getRes(),
                                                ArrayRef<int64_t>{(int64_t)i})
                       .getResult();
-        if (v.getType() != res.getType())
-          v = LLVM::vector_extract::create(b, loc, res.getType(), v,
+        auto resultTy = cast<VectorType>(res.getType());
+        auto resultCarrierTy = getBarrierCarrierType(resultTy, *target);
+        if (v.getType() != resultCarrierTy)
+          v = LLVM::vector_extract::create(b, loc, resultCarrierTy, v,
                                            b.getI64IntegerAttr(0));
+        if (resultCarrierTy != resultTy)
+          v = vector::BitCastOp::create(b, loc, resultTy, v);
         res.replaceAllUsesWith(v);
       }
       op.erase();

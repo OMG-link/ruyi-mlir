@@ -95,6 +95,19 @@ namespace {
 
 constexpr StringLiteral kCategory = "tile-to-vector";
 
+std::string describeVectorOperation(Operation *op) {
+  std::string text;
+  llvm::raw_string_ostream os(text);
+  os << op->getName() << " operands<";
+  llvm::interleaveComma(op->getOperandTypes(), os,
+                        [&](Type type) { os << type; });
+  os << "> results<";
+  llvm::interleaveComma(op->getResultTypes(), os,
+                        [&](Type type) { os << type; });
+  os << ">";
+  return text;
+}
+
 bool isTensor(Value v) { return isa<TensorType>(v.getType()); }
 
 /// Ops whose tensor result carries no data dependence on other tensors.
@@ -339,8 +352,8 @@ bool ConvertTileTensorToVectorPass::isLegalType(
     reason = "tensor shape is not static";
     return false;
   }
-  if (!target.supportsVectorElementType(ty.getElementType())) {
-    reason = "element type has no vector form on the target";
+  if (!target.canHoldVectorElementType(ty.getElementType())) {
+    reason = "element type cannot be represented in vector registers";
     return false;
   }
   unsigned limit = target.getRegisterGroupElements(ty.getElementType());
@@ -408,6 +421,15 @@ void ConvertTileTensorToVectorPass::analyze(
     } else if (auto generic = dyn_cast<linalg::GenericOp>(op)) {
       std::string reason;
       if (isElementwiseGeneric(generic, reason)) {
+        for (Operation &bodyOp : generic.getBody()->without_terminator()) {
+          if (target.supportsVectorOperation(&bodyOp))
+            continue;
+          blockAll(op, (Twine("generic body operation ") +
+                        describeVectorOperation(&bodyOp) +
+                        " is unsupported for vector execution")
+                           .str());
+          return;
+        }
         SmallVector<Value> vs(generic.getDpsInputs());
         for (OpOperand &out : generic.getDpsInitsMutable())
           if (!generic.getMatchingBlockArgument(&out).use_empty())
@@ -469,6 +491,12 @@ void ConvertTileTensorToVectorPass::analyze(
     } else if (op->hasTrait<OpTrait::Elementwise>() &&
                op->getNumRegions() == 0 && op->getNumResults() > 0 &&
                llvm::all_of(op->getResults(), isTensor)) {
+      if (!target.supportsVectorOperation(op)) {
+        blockAll(op, (Twine("vector operation ") + describeVectorOperation(op) +
+                      " is unsupported for vector execution")
+                         .str());
+        return;
+      }
       SmallVector<Value> vs;
       for (Value v : op->getOperands())
         if (isTensor(v))

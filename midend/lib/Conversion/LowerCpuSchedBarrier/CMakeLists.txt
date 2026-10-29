@@ -7,4 +7,5 @@ add_mlir_library(LowerCpuSchedBarrierPass
     MLIRIR
     MLIRLLVMDialect
     MLIRPass
+    MLIRVectorDialect
 )
