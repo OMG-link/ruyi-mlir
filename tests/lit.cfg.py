@@ -1,6 +1,7 @@
 # -*- Python -*-
 
 import os
+import platform
 
 import lit.formats
 import lit.util
@@ -27,6 +28,16 @@ config.test_exec_root = os.path.join(config.buddy_obj_root, "tests")
 
 config.substitutions.append(("%PATH%", config.environment["PATH"]))
 config.substitutions.append(("%shlibext", config.llvm_shlib_ext))
+
+# JIT execution needs the native scalable-vector extension explicitly enabled;
+# host feature detection does not expose RVV on every supported system.
+native_arch = platform.machine().lower()
+scalable_vector_mattr = ""
+if native_arch.startswith("riscv"):
+    scalable_vector_mattr = "-mattr=+v,+f,+d"
+elif native_arch in ("aarch64", "arm64"):
+    scalable_vector_mattr = "-mattr=+sve"
+config.substitutions.append(("%scalable_vector_mattr", scalable_vector_mattr))
 
 openmp_runtime_dir = config.mlir_runner_utils_dir
 openmp_runtime_candidates = [
