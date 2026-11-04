@@ -43,6 +43,8 @@
 #include "AME/Transform.h"
 #include "Bud/BudDialect.h"
 #include "Bud/BudOps.h"
+#include "CPar/CParDialect.h"
+#include "CPar/CParTransforms.h"
 #include "DAP/DAPDialect.h"
 #include "DAP/DAPOps.h"
 #include "DIP/DIPDialect.h"
@@ -182,6 +184,10 @@ int main(int argc, char **argv) {
   mlir::buddy::registerQGEMMDimTransformPass();
   mlir::buddy::registerQGEMMRecognizePass();
   mlir::buddy::registerQGEMMTilingPass();
+  // Register CPU parallel region passes.
+  mlir::buddy::registerCParDistributeLoopsPass();
+  mlir::buddy::registerCParForallToParallelPass();
+  mlir::buddy::registerCParOutlineToRuntimePass();
   // Register gpu passes
   mlir::buddy::registerConvertMemcpyToGPUPass();
   mlir::buddy::registerLegalizeShmemOutliningPass();
@@ -198,6 +204,7 @@ int main(int argc, char **argv) {
                   buddy::rvv::RVVDialect,
                   buddy::vector_exp::VectorExpDialect,
                   buddy::vir::VIRDialect,
+                  buddy::cpar::CParDialect,
                   buddy::gemmini::GemminiDialect,
                   buddy::xtame::XTAMEDialect,
                   buddy::ame::AMEDialect,
