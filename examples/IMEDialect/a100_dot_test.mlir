@@ -2,7 +2,7 @@
 // CHECK-DAG: smt.vmadot
 // CHECK-DAG: smt.vfwmadot
 
-// K3 hardware regression entry points, called by runtime_k3_dot_test.c.
+// K3 hardware regression entry points, called by runtime_a100_dot_test.c.
 // Build and run with: make k3-dot-test; scp k3-dot-test k3-005:/tmp/
 func.func @loop_dot(%c: memref<1x1xi32>, %a: memref<1x1xi8>,
                    %b: memref<1x1xi8>) attributes {llvm.emit_c_interface} {

@@ -1,4 +1,4 @@
-// RUN: buddy-opt %s -set-llvm-target="chip=spacemit-a100 vlen=1024" -convert-tile-tensor-to-vector=contract-ime-tiles -canonicalize | FileCheck %s
+// RUN: buddy-opt %s -set-llvm-target="chip=spacemit-a100 vlen=1024" -convert-tile-tensor-to-vector=allow-ime-tile-contracts -canonicalize | FileCheck %s
 //
 // On the A100, the widening fp16 dot Triton writes — both operands extended
 // to fp32 by a generic, B after its transpose — converts to vector.transpose,

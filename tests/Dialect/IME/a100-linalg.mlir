@@ -1,4 +1,4 @@
-// RUN: buddy-opt %S/../../../examples/IMEDialect/k3_dot_test.mlir -lower-linalg-to-ime="target=a100" | FileCheck %s --check-prefix=TILES
+// RUN: buddy-opt %S/../../../examples/IMEDialect/a100_dot_test.mlir -lower-linalg-to-ime="target=a100" | FileCheck %s --check-prefix=TILES
 // RUN: buddy-opt %s -lower-linalg-to-ime="target=a100" | FileCheck %s --check-prefix=KEEP
 
 // Native tile sizes must reach the boundary-aware matmul and transposed batch

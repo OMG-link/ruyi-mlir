@@ -47,8 +47,8 @@
 // values in registers, so an operand whose component stays in tensors is an
 // error.
 //
-// With `contract-ime-tiles`, `linalg.matmul(A, linalg.transpose(B))` of an
-// IME tile shape of the target (`Dialect/IME/TileShapes.h`: the K1's int8
+// With `allow-ime-tile-contracts`, `linalg.matmul(A, linalg.transpose(B))` of
+// an IME tile shape of the target (`Dialect/IME/TileShapes.h`: the K1's int8
 // 4x8 tiles, the A100's int8 8x16 and fp16 8x8 tiles) also converts, to
 // `vector.transpose` and a `vector.contract` on extended operands. Other
 // matmuls and transposes block, because only those have a register-level
@@ -296,8 +296,8 @@ public:
   ConvertTileTensorToVectorPass(const ConvertTileTensorToVectorPass &other)
       : PassWrapper(other) {}
 
-  Option<bool> contractIMETiles{
-      *this, "contract-ime-tiles",
+  Option<bool> allowIMETileContracts{
+      *this, "allow-ime-tile-contracts",
       llvm::cl::desc("Convert matmul(A, transpose(B)) of the target's IME "
                      "tile shapes into vector.contract; needs "
                      "-lower-vector-contract-to-ime-tile later"),
@@ -453,7 +453,7 @@ void ConvertTileTensorToVectorPass::analyze(
               "store target is not row-major with unit innermost stride");
       return;
     } else if (auto matmul = dyn_cast<linalg::MatmulOp>(op)) {
-      if (contractIMETiles) {
+      if (allowIMETileContracts) {
         if (std::optional<TileDot> dot =
                 matchTileDot(matmul, ::buddy::ime::getTileShapes(target))) {
           uniteAll({dot->lhs, dot->rhs, dot->acc, matmul.getResult(0)});
@@ -461,7 +461,7 @@ void ConvertTileTensorToVectorPass::analyze(
         }
       }
     } else if (auto transpose = dyn_cast<linalg::TransposeOp>(op)) {
-      if (contractIMETiles &&
+      if (allowIMETileContracts &&
           isAbsorbedTranspose(transpose, ::buddy::ime::getTileShapes(target))) {
         uniteAll({transpose.getInput(), transpose.getResult()[0]});
         return;

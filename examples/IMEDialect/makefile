@@ -21,7 +21,7 @@ a100-ssa-object:
 
 k3-dot-object:
 	mkdir -p $(A100_OUT)
-	$(BUDDY_OPT) k3_dot_test.mlir $(A100_LOWER_FLAGS) \
+	$(BUDDY_OPT) a100_dot_test.mlir $(A100_LOWER_FLAGS) \
 		-o $(A100_OUT)/k3-dot.mlir
 	$(BUDDY_TRANSLATE) -buddy-to-llvmir $(A100_OUT)/k3-dot.mlir \
 		-o $(A100_OUT)/k3-dot.ll
