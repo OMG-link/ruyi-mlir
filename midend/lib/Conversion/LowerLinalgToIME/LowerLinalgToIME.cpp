@@ -36,8 +36,8 @@ using namespace mlir;
 using namespace buddy::ime;
 
 static void getTileSizes(Type elemType, int64_t &tileM, int64_t &tileK,
-                         int64_t &tileN, bool k3 = false) {
-  if (k3) {
+                         int64_t &tileN, bool a100 = false) {
+  if (a100) {
     tileM = tileN = 8;
     tileK = elemType.isF16() ? 8 : 16;
     return;
@@ -71,18 +71,18 @@ namespace {
 
 class MatmulToIMELowering : public OpRewritePattern<linalg::MatmulOp> {
 public:
-  MatmulToIMELowering(MLIRContext *context, bool k3)
-      : OpRewritePattern<linalg::MatmulOp>(context), k3(k3) {}
+  MatmulToIMELowering(MLIRContext *context, bool a100)
+      : OpRewritePattern<linalg::MatmulOp>(context), a100(a100) {}
 
 private:
-  bool k3;
+  bool a100;
 
 public:
   LogicalResult matchAndRewrite(linalg::MatmulOp matmulOp,
                                 PatternRewriter &rewriter) const override {
     Location loc = matmulOp.getLoc();
 
-    if (k3) {
+    if (a100) {
       auto maps = matmulOp.getIndexingMapsArray();
       auto m = rewriter.getAffineDimExpr(0);
       auto n = rewriter.getAffineDimExpr(1);
@@ -114,7 +114,7 @@ public:
 
     if (!isSupportedElementType(AElemType) ||
         !isSupportedElementType(BElemType) ||
-        (k3 && (AElemType.isInteger(16) || BElemType.isInteger(16)))) {
+        (a100 && (AElemType.isInteger(16) || BElemType.isInteger(16)))) {
       return rewriter.notifyMatchFailure(
           matmulOp, "only int8, int16, and f16 element types are supported");
     }
@@ -151,7 +151,7 @@ public:
 
     // Get tile sizes for the element type
     int64_t tileM, tileK, tileN;
-    getTileSizes(AElemType, tileM, tileK, tileN, k3);
+    getTileSizes(AElemType, tileM, tileK, tileN, a100);
 
     // This pattern only handles static dimensions
     bool hasStaticDims = !ShapedType::isDynamic(M) &&
@@ -364,11 +364,11 @@ public:
 
 class GenericMatmulToIMELowering : public OpRewritePattern<linalg::GenericOp> {
 public:
-  GenericMatmulToIMELowering(MLIRContext *context, bool k3)
-      : OpRewritePattern<linalg::GenericOp>(context), k3(k3) {}
+  GenericMatmulToIMELowering(MLIRContext *context, bool a100)
+      : OpRewritePattern<linalg::GenericOp>(context), a100(a100) {}
 
 private:
-  bool k3;
+  bool a100;
 
 public:
   LogicalResult matchAndRewrite(linalg::GenericOp genericOp,
@@ -437,7 +437,7 @@ public:
     if (!isSupportedElementType(AElemType))
       return failure();
 
-    if (k3) {
+    if (a100) {
       // Use the boundary-aware named matmul path, including B transposition.
       // A generic with the same op names but a different scalar computation
       // must not be mistaken for a dot product.
@@ -459,7 +459,7 @@ public:
 
     bool isFloatGeneric = AElemType.isF16();
     int64_t tileM, tileK, tileN;
-    getTileSizes(AElemType, tileM, tileK, tileN, k3);
+    getTileSizes(AElemType, tileM, tileK, tileN, a100);
 
     ArrayRef<int64_t> AShape = AType.getShape();
     ArrayRef<int64_t> BShape = BType.getShape();
@@ -544,11 +544,11 @@ public:
 class BatchMatmulTransposeBToIMELowering
     : public OpRewritePattern<linalg::BatchMatmulOp> {
 public:
-  BatchMatmulTransposeBToIMELowering(MLIRContext *context, bool k3)
-      : OpRewritePattern<linalg::BatchMatmulOp>(context), k3(k3) {}
+  BatchMatmulTransposeBToIMELowering(MLIRContext *context, bool a100)
+      : OpRewritePattern<linalg::BatchMatmulOp>(context), a100(a100) {}
 
 private:
-  bool k3;
+  bool a100;
 
 public:
   LogicalResult matchAndRewrite(linalg::BatchMatmulOp op,
@@ -576,7 +576,7 @@ public:
 
     if (!isSupportedElementType(AElemType) ||
         !isSupportedElementType(BElemType) ||
-        (k3 && (AElemType.isInteger(16) || BElemType.isInteger(16))))
+        (a100 && (AElemType.isInteger(16) || BElemType.isInteger(16))))
       return rewriter.notifyMatchFailure(
           op, "only int8, int16, and f16 element types are supported");
 
@@ -612,7 +612,7 @@ public:
                                          "dynamic dimensions not supported");
 
     int64_t tileM, tileK, tileN;
-    getTileSizes(AElemType, tileM, tileK, tileN, k3);
+    getTileSizes(AElemType, tileM, tileK, tileN, a100);
 
     int64_t numTilesM = (M + tileM - 1) / tileM;
     int64_t numTilesK = (K + tileK - 1) / tileK;
@@ -1272,7 +1272,9 @@ public:
       : PassWrapper(other) {}
 
   Option<std::string> targetCPU{
-      *this, "target", llvm::cl::desc("IME target: generic (K1) or k3 (A100)"),
+      *this, "target",
+      llvm::cl::desc(
+          "IME target: generic (K1) or a100 (the A100 cores of the K3)"),
       llvm::cl::init("generic")};
 
   void getDependentDialects(DialectRegistry &registry) const override {
@@ -1293,14 +1295,14 @@ void LowerLinalgToIMEPass::runOnOperation() {
 
   RewritePatternSet patterns(context);
 
-  if (targetCPU != "generic" && targetCPU != "k3") {
+  if (targetCPU != "generic" && targetCPU != "a100") {
     module.emitError("unsupported IME target: ") << targetCPU;
     return signalPassFailure();
   }
-  bool k3 = targetCPU == "k3";
+  bool a100 = targetCPU == "a100";
   patterns.add<MatmulToIMELowering, GenericMatmulToIMELowering,
-               BatchMatmulTransposeBToIMELowering>(context, k3);
-  if (!k3) {
+               BatchMatmulTransposeBToIMELowering>(context, a100);
+  if (!a100) {
     patterns.add<Conv2DNhwcHwcfToIMELowering>(context);
     patterns.add<Conv2DNchwFchwToIMELowering>(context);
   }

@@ -46,7 +46,9 @@ public:
   LowerIMEToLLVMPass(const LowerIMEToLLVMPass &other) : PassWrapper(other) {}
 
   Option<std::string> targetCPU{
-      *this, "target", llvm::cl::desc("IME target: generic (K1) or k3 (A100)"),
+      *this, "target",
+      llvm::cl::desc(
+          "IME target: generic (K1) or a100 (the A100 cores of the K3)"),
       llvm::cl::init("generic")};
 
   void getDependentDialects(DialectRegistry &registry) const override {
@@ -69,8 +71,8 @@ void LowerIMEToLLVMPass::runOnOperation() {
   LLVMConversionTarget target(*context);
 
   configureIMELegalizeForExportTarget(target);
-  if (targetCPU == "k3")
-    populateIMEK3LegalizeForLLVMExportPatterns(converter, patterns);
+  if (targetCPU == "a100")
+    populateIMEA100LegalizeForLLVMExportPatterns(converter, patterns);
   else if (targetCPU == "generic")
     populateIMELegalizeForLLVMExportPatterns(converter, patterns);
   else {

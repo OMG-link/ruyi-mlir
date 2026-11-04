@@ -170,7 +170,7 @@ def build_stages(
         stages.append(
             (
                 "buddy-opt",
-                (["-lower-ime=target=k3"] if ime else [])
+                (["-lower-ime=target=a100"] if ime else [])
                 + [
                     f"-convert-scf-to-openmp=num-threads={num_threads}",
                     "-expand-strided-metadata",

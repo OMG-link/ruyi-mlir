@@ -2507,7 +2507,7 @@ def _attn_prefill_fn(ty, spec):
 # The A100 cores of the SpacemiT K3 have a matrix engine (IME). A prefill
 # tile of IME_ROWS rows multiplies int8 activations by the IME layout of the
 # int4 weights with smt.vmadot.hp (ime.intr.vmadot.hp of buddy-mlir's IME
-# dialect, -lower-ime target=k3). These functions are built into a module of
+# dialect, -lower-ime target=a100). These functions are built into a module of
 # their own (gen_kernels(..., "ime")), which compile_pipeline.py compiles
 # with the A100 options (pipeline "kernels_ime").
 

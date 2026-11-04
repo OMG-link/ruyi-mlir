@@ -14,15 +14,19 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// One IME dot reads A and B from one vector register each and accumulates
-// into an aligned register pair, so its tile shape follows from VLEN:
+// One IME dot reads A (M x K) and B (stored N x K) from one vector register
+// each and accumulates into C (M x N) in an aligned register pair. The tile
+// shape follows from two facts of the target, never from the chip name:
 //
-//   K1   (XSMTVDot,   VLEN 256)   int8 4x8  * (4x8)^T  -> int32 4x4
-//   A100 (XSMTVDotII, VLEN 1024)  int8 8x16 * (8x16)^T -> int32 8x8
-//                                 fp16 8x8  * (8x8)^T  -> fp32  8x8
+//   * the extension gives the input types: XSMTVDot has the int8 dot,
+//     XSMTVDotII the int8 and the widening fp16 dot (it has more, not used
+//     yet);
+//   * the exact VLEN gives M = N: 4 at VLEN 256, 8 at VLEN 1024, and K
+//     fills one register, K = VLEN / (M * SEW).
 //
-// B is stored N x K. The shapes need the exact VLEN; a target whose VLEN is
-// only bounded has none.
+// So the K1 (X60, XSMTVDot, VLEN 256) has the int8 4x8 tile and the A100
+// (XSMTVDotII, VLEN 1024) the int8 8x16 and fp16 8x8 tiles. A target with
+// another VLEN, or whose VLEN is only bounded, has none.
 //
 //===----------------------------------------------------------------------===//
 
@@ -47,12 +51,25 @@ inline llvm::SmallVector<TileShape, 2>
 getTileShapes(const mlir::buddy::TargetInfo &target) {
   if (target.getArch() != mlir::buddy::TargetInfo::Arch::RISCV)
     return {};
+  bool dotII = target.hasExtension("xsmtvdotii");
+  if (!dotII && !target.hasExtension("xsmtvdot"))
+    return {};
   std::optional<unsigned> vlen = target.getExactVectorRegisterBits();
-  if (target.hasExtension("xsmtvdotii") && vlen == 1024u)
-    return {{8, 8, 16, false}, {8, 8, 8, true}};
-  if (target.hasExtension("xsmtvdot") && vlen == 256u)
-    return {{4, 4, 8, false}};
-  return {};
+  int64_t mn;
+  if (vlen == 256u)
+    mn = 4;
+  else if (vlen == 1024u)
+    mn = 8;
+  else
+    return {};
+  // K fills one register of SEW-bit elements.
+  auto shape = [&](unsigned sew, bool isFloat) {
+    return TileShape{mn, mn, static_cast<int64_t>(*vlen / (mn * sew)), isFloat};
+  };
+  llvm::SmallVector<TileShape, 2> shapes = {shape(8, /*isFloat=*/false)};
+  if (dotII)
+    shapes.push_back(shape(16, /*isFloat=*/true));
+  return shapes;
 }
 
 } // namespace ime

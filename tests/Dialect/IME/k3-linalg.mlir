@@ -1,5 +1,5 @@
-// RUN: buddy-opt %S/../../../examples/IMEDialect/k3_dot_test.mlir -lower-linalg-to-ime="target=k3" | FileCheck %s --check-prefix=TILES
-// RUN: buddy-opt %s -lower-linalg-to-ime="target=k3" | FileCheck %s --check-prefix=KEEP
+// RUN: buddy-opt %S/../../../examples/IMEDialect/k3_dot_test.mlir -lower-linalg-to-ime="target=a100" | FileCheck %s --check-prefix=TILES
+// RUN: buddy-opt %s -lower-linalg-to-ime="target=a100" | FileCheck %s --check-prefix=KEEP
 
 // Native tile sizes must reach the boundary-aware matmul and transposed batch
 // paths. FP16 generics use that same path, rather than treating B[K,N] as B[N,K].

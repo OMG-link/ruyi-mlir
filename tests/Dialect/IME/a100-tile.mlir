@@ -1,5 +1,5 @@
-// RUN: buddy-opt %s -lower-ime="target=k3" | FileCheck %s --check-prefix=MLIR
-// RUN: buddy-opt %s -lower-ime="target=k3" -convert-vector-to-llvm -convert-func-to-llvm \
+// RUN: buddy-opt %s -lower-ime="target=a100" | FileCheck %s --check-prefix=MLIR
+// RUN: buddy-opt %s -lower-ime="target=a100" -convert-vector-to-llvm -convert-func-to-llvm \
 // RUN:   -reconcile-unrealized-casts \
 // RUN:   | buddy-translate -buddy-to-llvmir \
 // RUN:   | buddy-llc -mtriple=riscv64 -mattr=+m,+v,+zvfh,+zvl1024b,+xsmtvdotii -verify-machineinstrs \

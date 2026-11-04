@@ -4,7 +4,7 @@
 // RUN:   | buddy-translate -buddy-to-llvmir \
 // RUN:   | buddy-llc -mtriple=riscv64 -mattr=+m,+v,+zvl256b,+xsmtvdot -verify-machineinstrs \
 // RUN:   | FileCheck %s --check-prefix=ASM
-// RUN: buddy-opt %s -lower-ime="target=k3" -verify-diagnostics -split-input-file -o /dev/null
+// RUN: buddy-opt %s -lower-ime="target=a100" -verify-diagnostics -split-input-file -o /dev/null
 //
 // Value-level K1 tile dots: each fixed tile is placed in the low part of its
 // scalable register type, so at VLEN = 256 the dot reads and writes

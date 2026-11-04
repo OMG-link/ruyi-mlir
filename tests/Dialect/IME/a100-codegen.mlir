@@ -1,5 +1,5 @@
 // RUN: %PYTHON %S/../../../examples/IMEDialect/generate_a100_tests.py %t
-// RUN: buddy-opt %t/a100-kernels.mlir -lower-ime="target=k3" | buddy-translate -buddy-to-llvmir > %t/kernels.ll
+// RUN: buddy-opt %t/a100-kernels.mlir -lower-ime="target=a100" | buddy-translate -buddy-to-llvmir > %t/kernels.ll
 // RUN: FileCheck %s --check-prefix=IR < %t/kernels.ll
 // RUN: buddy-llc -mtriple=riscv64 -mcpu=spacemit-a100 -verify-machineinstrs %t/kernels.ll -o - | FileCheck %s --check-prefix=ASM
 

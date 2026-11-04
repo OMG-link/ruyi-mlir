@@ -1,5 +1,5 @@
-// RUN: buddy-opt %s -lower-ime="target=k3" | FileCheck %s
-// RUN: buddy-opt %s -lower-ime="target=k3" -convert-scf-to-cf -convert-cf-to-llvm -convert-arith-to-llvm -convert-func-to-llvm -finalize-memref-to-llvm -reconcile-unrealized-casts | FileCheck %s --check-prefix=LLVM
+// RUN: buddy-opt %s -lower-ime="target=a100" | FileCheck %s
+// RUN: buddy-opt %s -lower-ime="target=a100" -convert-scf-to-cf -convert-cf-to-llvm -convert-arith-to-llvm -convert-func-to-llvm -finalize-memref-to-llvm -reconcile-unrealized-casts | FileCheck %s --check-prefix=LLVM
 
 // Partial, rectangular tiles must be padded to A100 capacity. Strided source
 // memrefs must be accessed through their descriptors rather than a flat pointer.

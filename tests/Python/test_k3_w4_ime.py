@@ -129,7 +129,7 @@ print(
 # CHECK: pass groups: k 1536 48 k 8960 140
 # CHECK-NEXT: k 8960: copies 2 tile calls 2 omp loops 5
 
-# The "kernels_ime" pipeline: -lower-ime target=k3, buddy-translate, llc for
+# The "kernels_ime" pipeline: -lower-ime target=a100, buddy-translate, llc for
 # the A100, the exact VLEN included whatever the build gives the other
 # kernels (an equal one is not repeated, another one is refused).
 stages = compile_pipeline.build_stages("kernels_ime", 8, "", "w4g32")

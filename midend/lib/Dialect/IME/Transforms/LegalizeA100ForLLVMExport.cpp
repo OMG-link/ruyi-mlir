@@ -47,7 +47,7 @@ Value tilePointer(ConversionPatternRewriter &rewriter, Location loc,
 }
 
 template <typename OpTy, typename IntrOpTy>
-struct IMEK3DotLowering : public ConvertOpToLLVMPattern<OpTy> {
+struct IMEA100DotLowering : public ConvertOpToLLVMPattern<OpTy> {
   using ConvertOpToLLVMPattern<OpTy>::ConvertOpToLLVMPattern;
 
   LogicalResult
@@ -68,14 +68,14 @@ struct IMEK3DotLowering : public ConvertOpToLLVMPattern<OpTy> {
         (fp ? !cType.getElementType().isF16()
             : !cType.getElementType().isInteger(32)))
       return op.emitError(
-          "K3 IME requires static packed int8/int32 or fp16 tiles");
+          "A100 IME requires static packed int8/int32 or fp16 tiles");
 
     int64_t m = cType.getDimSize(0), n = cType.getDimSize(1);
     int64_t k = aType.getDimSize(1);
     if (m <= 0 || n <= 0 || k <= 0 || m > 8 || n > 8 || k > tileK ||
         aType.getDimSize(0) != m || bType.getDimSize(0) != n ||
         bType.getDimSize(1) != k)
-      return op.emitError("K3 IME expects C[M,N], A[M,K], packed B[N,K], "
+      return op.emitError("A100 IME expects C[M,N], A[M,K], packed B[N,K], "
                           "with M,N <= 8 and K <= ")
              << tileK;
 
@@ -182,13 +182,13 @@ struct IMEK3DotLowering : public ConvertOpToLLVMPattern<OpTy> {
 
 } // namespace
 
-void mlir::populateIMEK3LegalizeForLLVMExportPatterns(
+void mlir::populateIMEA100LegalizeForLLVMExportPatterns(
     LLVMTypeConverter &converter, RewritePatternSet &patterns) {
-  patterns.add<IMEK3DotLowering<VmadotOp, Vmadot_IntrOp>,
-               IMEK3DotLowering<VmadotuOp, Vmadotu_IntrOp>,
-               IMEK3DotLowering<VmadotsuOp, Vmadotsu_IntrOp>,
-               IMEK3DotLowering<VmadotusOp, Vmadotus_IntrOp>,
-               IMEK3DotLowering<VfmadotOp, Vfmadot_IntrOp>>(converter);
+  patterns.add<IMEA100DotLowering<VmadotOp, Vmadot_IntrOp>,
+               IMEA100DotLowering<VmadotuOp, Vmadotu_IntrOp>,
+               IMEA100DotLowering<VmadotsuOp, Vmadotsu_IntrOp>,
+               IMEA100DotLowering<VmadotusOp, Vmadotus_IntrOp>,
+               IMEA100DotLowering<VfmadotOp, Vfmadot_IntrOp>>(converter);
   // The A100's register tiles at VLEN 1024.
   patterns.add<TileDotLowering<TileVmadotOp, Vmadot_IntrOp>,
                TileDotLowering<TileVmadotuOp, Vmadotu_IntrOp>,

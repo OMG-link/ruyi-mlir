@@ -6,7 +6,7 @@ BUDDY_LLC := ../../build/bin/buddy-llc
 .DEFAULT_GOAL := all
 PYTHON ?= python3
 A100_OUT ?= ../../build/ime-a100
-A100_LOWER_FLAGS = -lower-linalg-to-ime="target=k3" -lower-ime="target=k3" \
+A100_LOWER_FLAGS = -lower-linalg-to-ime="target=a100" -lower-ime="target=a100" \
 	-expand-strided-metadata -convert-scf-to-cf -convert-cf-to-llvm \
 	-convert-arith-to-llvm -convert-func-to-llvm \
 	-finalize-memref-to-llvm -reconcile-unrealized-casts

@@ -1,4 +1,4 @@
-// RUN: buddy-opt %s -lower-linalg-to-ime="target=k3" -lower-ime="target=k3" -expand-strided-metadata -convert-scf-to-cf -convert-cf-to-llvm -convert-arith-to-llvm -convert-func-to-llvm -finalize-memref-to-llvm -reconcile-unrealized-casts | buddy-translate -buddy-to-llvmir | buddy-llc -mtriple=riscv64 -mcpu=spacemit-a100 -verify-machineinstrs -o - | FileCheck %s
+// RUN: buddy-opt %s -lower-linalg-to-ime="target=a100" -lower-ime="target=a100" -expand-strided-metadata -convert-scf-to-cf -convert-cf-to-llvm -convert-arith-to-llvm -convert-func-to-llvm -finalize-memref-to-llvm -reconcile-unrealized-casts | buddy-translate -buddy-to-llvmir | buddy-llc -mtriple=riscv64 -mcpu=spacemit-a100 -verify-machineinstrs -o - | FileCheck %s
 // CHECK-DAG: smt.vmadot
 // CHECK-DAG: smt.vfwmadot
 
