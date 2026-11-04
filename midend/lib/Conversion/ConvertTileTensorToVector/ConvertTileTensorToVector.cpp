@@ -47,13 +47,13 @@
 // values in registers, so an operand whose component stays in tensors is an
 // error.
 //
-// With `contract-k1-tiles`, `linalg.matmul(A, linalg.transpose(B))` of the
-// SpacemiT K1 IME tile shape (4x8 int8 by 8x4 int8 into 4x4 int32, on a
-// target with XSMTVDot at VLEN = 256) also converts, to `vector.transpose`
-// and a `vector.contract` on extended operands. Other matmuls and
-// transposes block, because only those have a register-level lowering
-// (`--lower-vector-contract-to-ime-tile`) in the pipelines that set the
-// option.
+// With `contract-ime-tiles`, `linalg.matmul(A, linalg.transpose(B))` of an
+// IME tile shape of the target (`Dialect/IME/TileShapes.h`: the K1's int8
+// 4x8 tiles, the A100's int8 8x16 and fp16 8x8 tiles) also converts, to
+// `vector.transpose` and a `vector.contract` on extended operands. Other
+// matmuls and transposes block, because only those have a register-level
+// lowering (`--lower-vector-contract-to-ime-tile`) in the pipelines that set
+// the option.
 //
 // Values that carry no data dependence — `tensor.empty`, dense
 // `arith.constant`, the `outs` of `linalg.fill` and the unused `outs` of a
@@ -83,6 +83,7 @@
 
 #include "Dialect/Cpu/CpuDialect.h"
 #include "Dialect/Cpu/CpuOps.h"
+#include "Dialect/IME/TileShapes.h"
 #include "Utils/TargetInfo.h"
 
 #include "llvm/ADT/DenseMap.h"
@@ -188,56 +189,101 @@ bool isElementwiseGeneric(linalg::GenericOp generic, std::string &reason) {
   return true;
 }
 
-/// `linalg.matmul(A, linalg.transpose(B))` of the K1 IME tile shape: A and B
-/// are 4x8 int8 (B stored as N x K), C is 4x4 int32.
+/// `linalg.matmul(A, linalg.transpose(B))` of an IME tile shape of the
+/// target (B stored as N x K). The int8 form multiplies int8 tiles into an
+/// int32 tile with the matmul's cast; the fp16 form is how Triton writes a
+/// widening fp16 dot: both operands are extended to fp32 first, B after its
+/// transpose.
 struct TileDot {
   Value lhs, rhs, acc;
   bool isUnsigned;
+  bool isFloat;
 };
 
-/// True when the target executes one such tile product as a single `vmadot`:
-/// the K1's XSMTVDot at VLEN = 256, where a 4x8 int8 tile is one register.
-bool hasK1TileDot(const mlir::buddy::TargetInfo &target) {
-  return target.getArch() == mlir::buddy::TargetInfo::Arch::RISCV &&
-         target.hasExtension("xsmtvdot") &&
-         target.getExactVectorRegisterBits() == 256;
-}
-
-bool isTileType(Value v, ArrayRef<int64_t> shape, unsigned width) {
+bool isTileType(Value v, ArrayRef<int64_t> shape, Type element) {
   auto ty = dyn_cast<RankedTensorType>(v.getType());
-  return ty && ty.getShape() == shape && ty.getElementType().isInteger(width);
+  return ty && ty.getShape() == shape && ty.getElementType() == element;
 }
 
-std::optional<TileDot> matchTileDot(linalg::MatmulOp matmul) {
+/// The f16 tensor an all-parallel `arith.extf` generic extends to f32.
+Value getExtendedF16(Value v) {
+  auto generic = v.getDefiningOp<linalg::GenericOp>();
+  if (!generic || generic.getNumDpsInputs() != 1 ||
+      generic.getNumResults() != 1)
+    return {};
+  Block *body = generic.getBody();
+  if (!llvm::hasSingleElement(body->without_terminator()))
+    return {};
+  auto ext = dyn_cast<arith::ExtFOp>(body->front());
+  if (!ext || ext.getIn() != body->getArgument(0) ||
+      !ext.getIn().getType().isF16() || !ext.getType().isF32() ||
+      body->getTerminator()->getOperand(0) != ext.getResult())
+    return {};
+  return generic.getDpsInputs()[0];
+}
+
+std::optional<TileDot> matchTileDot(linalg::MatmulOp matmul,
+                                    ArrayRef<::buddy::ime::TileShape> shapes) {
   if (!matmul.hasPureTensorSemantics() || matmul.hasUserDefinedMaps())
     return std::nullopt;
+  MLIRContext *ctx = matmul.getContext();
   Value lhs = matmul.getDpsInputs()[0];
-  auto transpose =
-      matmul.getDpsInputs()[1].getDefiningOp<linalg::TransposeOp>();
+  Value rhs = matmul.getDpsInputs()[1];
   Value acc = matmul.getDpsInits()[0];
-  if (!transpose || !transpose.hasPureTensorSemantics() ||
-      transpose.getPermutation() != ArrayRef<int64_t>{1, 0})
-    return std::nullopt;
-  Value rhs = transpose.getInput();
-  if (!isTileType(lhs, {4, 8}, 8) || !isTileType(rhs, {4, 8}, 8) ||
-      !isTileType(acc, {4, 4}, 32))
-    return std::nullopt;
-  return TileDot{lhs, rhs, acc,
-                 matmul.getCast() == linalg::TypeFn::cast_unsigned};
+  for (const ::buddy::ime::TileShape &shape : shapes) {
+    Value a = lhs, bt = rhs;
+    if (shape.isFloat) {
+      a = getExtendedF16(lhs);
+      bt = getExtendedF16(rhs);
+      if (!a || !bt)
+        continue;
+    }
+    auto transpose = bt.getDefiningOp<linalg::TransposeOp>();
+    if (!transpose || !transpose.hasPureTensorSemantics() ||
+        transpose.getPermutation() != ArrayRef<int64_t>{1, 0})
+      continue;
+    Type in = shape.isFloat ? Type(Float16Type::get(ctx))
+                            : Type(IntegerType::get(ctx, 8));
+    Type out = shape.isFloat ? Type(Float32Type::get(ctx))
+                             : Type(IntegerType::get(ctx, 32));
+    if (!isTileType(a, {shape.m, shape.k}, in) ||
+        !isTileType(transpose.getInput(), {shape.n, shape.k}, in) ||
+        !isTileType(acc, {shape.m, shape.n}, out))
+      continue;
+    return TileDot{lhs, rhs, acc,
+                   matmul.getCast() == linalg::TypeFn::cast_unsigned,
+                   shape.isFloat};
+  }
+  return std::nullopt;
 }
 
-/// A transpose read only as the B operand of K1 tile products converts with
-/// them; the IME lowering reads B in N x K order and drops it.
-bool isAbsorbedTranspose(linalg::TransposeOp transpose,
-                         const mlir::buddy::TargetInfo &target) {
-  if (!hasK1TileDot(target) || transpose->use_empty())
+/// True when every reader of `v` ends in the B operand of tile products:
+/// the matmul itself, or (fp16) the extension generic that feeds it.
+bool feedsOnlyTileDotRhs(Value v, ArrayRef<::buddy::ime::TileShape> shapes) {
+  if (v.use_empty())
     return false;
-  for (OpOperand &use : transpose->getResult(0).getUses()) {
-    auto matmul = dyn_cast<linalg::MatmulOp>(use.getOwner());
-    if (!matmul || use.getOperandNumber() != 1 || !matchTileDot(matmul))
+  for (OpOperand &use : v.getUses()) {
+    Operation *user = use.getOwner();
+    if (auto matmul = dyn_cast<linalg::MatmulOp>(user)) {
+      if (use.getOperandNumber() != 1 || !matchTileDot(matmul, shapes))
+        return false;
+      continue;
+    }
+    auto generic = dyn_cast<linalg::GenericOp>(user);
+    if (!generic || getExtendedF16(generic.getResult(0)) != v ||
+        !feedsOnlyTileDotRhs(generic.getResult(0), shapes))
       return false;
   }
   return true;
+}
+
+/// A transpose read only (through an extension) as the B operand of tile
+/// products converts with them; the IME lowering reads B in N x K order and
+/// drops it.
+bool isAbsorbedTranspose(linalg::TransposeOp transpose,
+                         ArrayRef<::buddy::ime::TileShape> shapes) {
+  return !shapes.empty() &&
+         feedsOnlyTileDotRhs(transpose->getResult(0), shapes);
 }
 
 class ConvertTileTensorToVectorPass
@@ -250,10 +296,10 @@ public:
   ConvertTileTensorToVectorPass(const ConvertTileTensorToVectorPass &other)
       : PassWrapper(other) {}
 
-  Option<bool> contractK1Tiles{
-      *this, "contract-k1-tiles",
-      llvm::cl::desc("Convert K1-tile-sized matmul(A, transpose(B)) into "
-                     "vector.contract; needs "
+  Option<bool> contractIMETiles{
+      *this, "contract-ime-tiles",
+      llvm::cl::desc("Convert matmul(A, transpose(B)) of the target's IME "
+                     "tile shapes into vector.contract; needs "
                      "-lower-vector-contract-to-ime-tile later"),
       llvm::cl::init(false)};
   StringRef getArgument() const final {
@@ -407,14 +453,16 @@ void ConvertTileTensorToVectorPass::analyze(
               "store target is not row-major with unit innermost stride");
       return;
     } else if (auto matmul = dyn_cast<linalg::MatmulOp>(op)) {
-      if (contractK1Tiles && hasK1TileDot(target)) {
-        if (std::optional<TileDot> dot = matchTileDot(matmul)) {
+      if (contractIMETiles) {
+        if (std::optional<TileDot> dot =
+                matchTileDot(matmul, ::buddy::ime::getTileShapes(target))) {
           uniteAll({dot->lhs, dot->rhs, dot->acc, matmul.getResult(0)});
           return;
         }
       }
     } else if (auto transpose = dyn_cast<linalg::TransposeOp>(op)) {
-      if (contractK1Tiles && isAbsorbedTranspose(transpose, target)) {
+      if (contractIMETiles &&
+          isAbsorbedTranspose(transpose, ::buddy::ime::getTileShapes(target))) {
         uniteAll({transpose.getInput(), transpose.getResult()[0]});
         return;
       }
@@ -607,11 +655,14 @@ void ConvertTileTensorToVectorPass::rewriteOp(OpBuilder &b, Operation *op) {
   if (auto matmul = dyn_cast<linalg::MatmulOp>(op)) {
     if (!matmul.hasPureTensorSemantics() || !isConverted(matmul.getResult(0)))
       return;
-    // C + sum_k ext(A[m,k]) * ext(B[k,n]), with linalg.matmul's cast.
+    // C + sum_k ext(A[m,k]) * ext(B[k,n]): integer operands are extended
+    // with linalg.matmul's cast; fp32 operands are already the extensions.
     Type i32 = b.getI32Type();
     bool isUnsigned = matmul.getCast() == linalg::TypeFn::cast_unsigned;
     auto extend = [&](Value v) -> Value {
       auto ty = cast<VectorType>(v.getType());
+      if (!ty.getElementType().isInteger())
+        return v;
       auto wide = VectorType::get(ty.getShape(), i32);
       return isUnsigned ? arith::ExtUIOp::create(b, loc, wide, v).getResult()
                         : arith::ExtSIOp::create(b, loc, wide, v).getResult();

@@ -16,6 +16,8 @@
 
 #include "Dialect/IME/IMEOps.h"
 #include "Dialect/IME/Transform.h"
+
+#include "TileDotLowering.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -178,19 +180,6 @@ struct IMEK3DotLowering : public ConvertOpToLLVMPattern<OpTy> {
   }
 };
 
-/// The tile ops describe K1 register tiles (VLEN = 256); the A100's VLEN of
-/// 1024 gives different tiles.
-template <typename OpTy>
-struct IMEK3UnsupportedLowering : public ConvertOpToLLVMPattern<OpTy> {
-  using ConvertOpToLLVMPattern<OpTy>::ConvertOpToLLVMPattern;
-
-  LogicalResult matchAndRewrite(OpTy op, typename OpTy::Adaptor,
-                                ConversionPatternRewriter &) const override {
-    return op.emitOpError("describes K1 register tiles and has no lowering "
-                          "on the SpacemiT A100");
-  }
-};
-
 } // namespace
 
 void mlir::populateIMEK3LegalizeForLLVMExportPatterns(
@@ -199,7 +188,10 @@ void mlir::populateIMEK3LegalizeForLLVMExportPatterns(
                IMEK3DotLowering<VmadotuOp, Vmadotu_IntrOp>,
                IMEK3DotLowering<VmadotsuOp, Vmadotsu_IntrOp>,
                IMEK3DotLowering<VmadotusOp, Vmadotus_IntrOp>,
-               IMEK3DotLowering<VfmadotOp, Vfmadot_IntrOp>,
-               IMEK3UnsupportedLowering<TileVmadotOp>,
-               IMEK3UnsupportedLowering<TileVmadotuOp>>(converter);
+               IMEK3DotLowering<VfmadotOp, Vfmadot_IntrOp>>(converter);
+  // The A100's register tiles at VLEN 1024.
+  patterns.add<TileDotLowering<TileVmadotOp, Vmadot_IntrOp>,
+               TileDotLowering<TileVmadotuOp, Vmadotu_IntrOp>,
+               TileDotLowering<TileVfwmadotOp, Vfmadot_IntrOp>>(converter,
+                                                                /*vlen=*/1024);
 }

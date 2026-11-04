@@ -1,9 +1,9 @@
-// RUN: buddy-opt %s -set-llvm-target="chip=spacemit-x60 vlen=256" -convert-tile-tensor-to-vector=contract-k1-tiles -canonicalize -split-input-file | FileCheck %s
-// RUN: buddy-opt %s -set-llvm-target="chip=spacemit-a100" -convert-tile-tensor-to-vector=contract-k1-tiles -split-input-file -remarks-filter-missed=tile-to-vector -o /dev/null 2>&1 | FileCheck %s --check-prefix=NODOT
-// RUN: buddy-opt %s -set-llvm-target="triple=x86_64-unknown-linux-gnu chip=icelake-server" -convert-tile-tensor-to-vector=contract-k1-tiles -split-input-file -remarks-filter-missed=tile-to-vector -o /dev/null 2>&1 | FileCheck %s --check-prefix=NODOT
+// RUN: buddy-opt %s -set-llvm-target="chip=spacemit-x60 vlen=256" -convert-tile-tensor-to-vector=contract-ime-tiles -canonicalize -split-input-file | FileCheck %s
+// RUN: buddy-opt %s -set-llvm-target="chip=spacemit-a100" -convert-tile-tensor-to-vector=contract-ime-tiles -split-input-file -remarks-filter-missed=tile-to-vector -o /dev/null 2>&1 | FileCheck %s --check-prefix=NODOT
+// RUN: buddy-opt %s -set-llvm-target="triple=x86_64-unknown-linux-gnu chip=icelake-server" -convert-tile-tensor-to-vector=contract-ime-tiles -split-input-file -remarks-filter-missed=tile-to-vector -o /dev/null 2>&1 | FileCheck %s --check-prefix=NODOT
 // RUN: buddy-opt %s -set-llvm-target="chip=spacemit-x60 vlen=256" -convert-tile-tensor-to-vector -split-input-file -remarks-filter-missed=tile-to-vector -o /dev/null 2>&1 | FileCheck %s --check-prefix=NODOT
 //
-// With contract-k1-tiles, on the K1 (XSMTVDot, VLEN = 256),
+// With contract-ime-tiles, on the K1 (XSMTVDot, VLEN = 256),
 // matmul(A, transpose(B)) on 4x8 int8 tiles into a 4x4 int32 tile becomes
 // vector.transpose plus vector.contract on extended operands. Targets without the K1 tile dot, or pipelines that do not set
 // the option, keep the matmul in tensors.

@@ -22,7 +22,7 @@
 // ASM-NOT: vse
 // ASM: ret
 func.func @tile_vmadot(%c: vector<16xi32>, %a: vector<32xi8>, %b: vector<32xi8>) -> vector<16xi32> {
-  // expected-error @+2 {{describes K1 register tiles and has no lowering on the SpacemiT A100}}
+  // expected-error @+2 {{operands are not one register tile and one register-pair accumulator at VLEN 1024}}
   // expected-error @+1 {{failed to legalize operation 'ime.tile.vmadot'}}
   %r = ime.tile.vmadot %c, %a, %b : vector<32xi8>, vector<32xi8> into vector<16xi32>
   return %r : vector<16xi32>
@@ -35,7 +35,7 @@ func.func @tile_vmadot(%c: vector<16xi32>, %a: vector<32xi8>, %b: vector<32xi8>)
 // ASM-LABEL: tile_vmadotu:
 // ASM: smt.vmadotu
 func.func @tile_vmadotu(%c: vector<16xi32>, %a: vector<32xi8>, %b: vector<32xi8>) -> vector<16xi32> {
-  // expected-error @+2 {{describes K1 register tiles and has no lowering on the SpacemiT A100}}
+  // expected-error @+2 {{operands are not one register tile and one register-pair accumulator at VLEN 1024}}
   // expected-error @+1 {{failed to legalize operation 'ime.tile.vmadotu'}}
   %r = ime.tile.vmadotu %c, %a, %b : vector<32xi8>, vector<32xi8> into vector<16xi32>
   return %r : vector<16xi32>

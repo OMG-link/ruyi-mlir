@@ -329,27 +329,39 @@ def VfmadotnOp : IME_Op<"vfmadotn"> {
 // IME tile operation definitions
 //===----------------------------------------------------------------------===//
 
-// Value-level dots on the register tiles of the SpacemiT K1 (VLEN = 256).
-// Unlike the memref ops above they read and produce SSA vectors, so tiles
-// that already live in registers are not stored and reloaded around each dot.
-// Tiles are flat row-major vectors: `lhs` is A (4x8 int8), `rhs` is B stored
-// as N x K (4x8 int8), and `acc` and the result are C (4x4 int32):
+// Value-level dots on register tiles. Unlike the memref ops above they read
+// and produce SSA vectors, so tiles that already live in registers are not
+// stored and reloaded around each dot. Tiles are flat row-major vectors:
+// `lhs` is A (M x K), `rhs` is B stored as N x K, and `acc` and the result
+// are C (M x N):
 //
-//   result[i*4 + j] = acc[i*4 + j] + sum_k lhs[i*8 + k] * rhs[j*8 + k]
-class IME_TileDotOp<string mnemonic, string signedness> :
-    IME_Op<"tile." # mnemonic, [Pure, AllTypesMatch<["acc", "result"]>]> {
-  let summary = "K1 int8 tile dot, " # signedness;
+//   result[i*N + j] = acc[i*N + j] + sum_k lhs[i*K + k] * rhs[j*K + k]
+//
+// Each operand is one whole register (C a register pair), so the tile shape
+// follows from VLEN: on the K1 (VLEN 256) the int8 dot is 4x8 by 4x8 into
+// 4x4 int32; on the A100 (VLEN 1024) it is 8x16 by 8x16 into 8x8 int32, and
+// the widening fp16 dot is 8x8 by 8x8 into 8x8 fp32. The lowering of each
+// target accepts its own shapes.
+class IME_TileDotOp<string mnemonic, string summaryText, Type input,
+                    Type accumulator> :
+    IME_Op<"tile." # mnemonic, [Pure, AllTypesMatch<["acc", "result"]>,
+                                AllTypesMatch<["lhs", "rhs"]>]> {
+  let summary = summaryText;
   let arguments = (ins
-    VectorOfLengthAndType<[16], [I32]>:$acc,
-    VectorOfLengthAndType<[32], [I8]>:$lhs,
-    VectorOfLengthAndType<[32], [I8]>:$rhs
+    VectorOfRankAndType<[1], [accumulator]>:$acc,
+    VectorOfRankAndType<[1], [input]>:$lhs,
+    VectorOfRankAndType<[1], [input]>:$rhs
   );
-  let results = (outs VectorOfLengthAndType<[16], [I32]>:$result);
+  let results = (outs VectorOfRankAndType<[1], [accumulator]>:$result);
   let assemblyFormat = "$acc `,` $lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `into` type($result)";
 }
 
-def TileVmadotOp : IME_TileDotOp<"vmadot", "signed x signed">;
-def TileVmadotuOp : IME_TileDotOp<"vmadotu", "unsigned x unsigned">;
+def TileVmadotOp : IME_TileDotOp<"vmadot", "int8 tile dot, signed x signed",
+                                 I8, I32>;
+def TileVmadotuOp : IME_TileDotOp<"vmadotu",
+                                  "int8 tile dot, unsigned x unsigned", I8, I32>;
+def TileVfwmadotOp : IME_TileDotOp<"vfwmadot",
+                                   "fp16 tile dot widening into fp32", F16, F32>;
 
 //===----------------------------------------------------------------------===//
 // IME Intrinsic operation definitions
