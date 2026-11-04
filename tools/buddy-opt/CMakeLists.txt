@@ -56,6 +56,7 @@ target_link_libraries(buddy-opt
   BuddyIME
   BuddyCpu
   BuddyIMETransforms
+  BuddyIMETileOperands
   LowerIMEPass
   BuddyAME
   BuddyAMETransforms
