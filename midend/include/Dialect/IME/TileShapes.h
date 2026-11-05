@@ -24,7 +24,7 @@
 //   * the exact VLEN gives M = N: 4 at VLEN 256, 8 at VLEN 1024, and K
 //     fills one register, K = VLEN / (M * SEW).
 //
-// So the K1 (X60, XSMTVDot, VLEN 256) has the int8 4x8 tile and the A100
+// So the K1's A60 cores (XSMTVDot, VLEN 256) have the int8 4x8 tile and the A100
 // (XSMTVDotII, VLEN 1024) the int8 8x16 and fp16 8x8 tiles. A target with
 // another VLEN, or whose VLEN is only bounded, has none.
 //
