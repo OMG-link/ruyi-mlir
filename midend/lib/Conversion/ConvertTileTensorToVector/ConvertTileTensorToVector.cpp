@@ -50,10 +50,13 @@
 // With `allow-ime-tile-contracts`, `linalg.matmul(A, linalg.transpose(B))` of
 // an IME tile shape of the target (`Dialect/IME/TileShapes.h`: the K1's int8
 // 4x8 tiles, the A100's int8 8x16 and fp16 8x8 tiles) also converts, to
-// `vector.transpose` and a `vector.contract` on extended operands. Other
-// matmuls and transposes block, because only those have a register-level
-// lowering (`--lower-vector-contract-to-ime-tile`) in the pipelines that set
-// the option.
+// `vector.transpose` and a `vector.contract` on extended operands. A product
+// whose K is below the tile's converts too when its operands are loads that
+// a full-K tile can be read from under a mask (see `matchTileDotForm`); its
+// `vector.contract` keeps the short K until `--promote-ime-tile-k` widens it.
+// Other matmuls and transposes block, because only those have a
+// register-level lowering (`--lower-vector-contract-to-ime-tile`) in the
+// pipelines that set the option.
 //
 // Values that carry no data dependence — `tensor.empty`, dense
 // `arith.constant`, the `outs` of `linalg.fill` and the unused `outs` of a
@@ -83,10 +86,12 @@
 
 #include "Dialect/Cpu/CpuDialect.h"
 #include "Dialect/Cpu/CpuOps.h"
+#include "Dialect/IME/TileOperands.h"
 #include "Dialect/IME/TileShapes.h"
 #include "Utils/TargetInfo.h"
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/SmallVector.h"
 
@@ -194,6 +199,14 @@ bool isElementwiseGeneric(linalg::GenericOp generic, std::string &reason) {
 /// int32 tile with the matmul's cast; the fp16 form is how Triton writes a
 /// widening fp16 dot: both operands are extended to fp32 first, B after its
 /// transpose.
+///
+/// A product whose K is below the tile's also matches when it can be read as
+/// a full-K tile under a mask (`--promote-ime-tile-k` widens it later): both
+/// operands come straight from `bufferization.to_tensor` loads, with only the
+/// form's own extension and transpose in between, whose views
+/// `canWidenAlongK` accepts; B may then also be a direct K x N load. Every
+/// reader of those loads must be such a product, at the same operand and the
+/// same tile K, so widening the load changes no other value.
 struct TileDot {
   Value lhs, rhs, acc;
   bool isUnsigned;
@@ -207,54 +220,139 @@ bool isTileType(Value v, ArrayRef<int64_t> shape, Type element) {
 
 /// The f16 tensor an all-parallel `arith.extf` generic extends to f32.
 Value getExtendedF16(Value v) {
+  Value in = ::buddy::ime::getZeroPreservingCastInput(v);
+  if (!in || !isa<RankedTensorType>(v.getType()))
+    return {};
   auto generic = v.getDefiningOp<linalg::GenericOp>();
-  if (!generic || generic.getNumDpsInputs() != 1 ||
-      generic.getNumResults() != 1)
+  if (!isa<arith::ExtFOp>(generic.getBody()->front()) ||
+      !getElementTypeOrSelf(in).isF16() || !getElementTypeOrSelf(v).isF32())
     return {};
-  Block *body = generic.getBody();
-  if (!llvm::hasSingleElement(body->without_terminator()))
-    return {};
-  auto ext = dyn_cast<arith::ExtFOp>(body->front());
-  if (!ext || ext.getIn() != body->getArgument(0) ||
-      !ext.getIn().getType().isF16() || !ext.getType().isF32() ||
-      body->getTerminator()->getOperand(0) != ext.getResult())
-    return {};
-  return generic.getDpsInputs()[0];
+  return in;
 }
 
-std::optional<TileDot> matchTileDot(linalg::MatmulOp matmul,
-                                    ArrayRef<::buddy::ime::TileShape> shapes) {
+/// The structure of a tile dot, without the reader check on a K-short one.
+/// `kTile` receives the K of the matched tile shape.
+std::optional<TileDot>
+matchTileDotForm(linalg::MatmulOp matmul,
+                 ArrayRef<::buddy::ime::TileShape> shapes, int64_t *kTile,
+                 Value *loads) {
   if (!matmul.hasPureTensorSemantics() || matmul.hasUserDefinedMaps())
     return std::nullopt;
   MLIRContext *ctx = matmul.getContext();
   Value lhs = matmul.getDpsInputs()[0];
   Value rhs = matmul.getDpsInputs()[1];
   Value acc = matmul.getDpsInits()[0];
-  for (const ::buddy::ime::TileShape &shape : shapes) {
+  auto accTy = dyn_cast<RankedTensorType>(acc.getType());
+  auto lhsTy = dyn_cast<RankedTensorType>(lhs.getType());
+  if (!accTy || !lhsTy || accTy.getRank() != 2 || lhsTy.getRank() != 2 ||
+      !lhsTy.hasStaticShape())
+    return std::nullopt;
+  int64_t k = lhsTy.getDimSize(1);
+  for (bool isFloat : {false, true}) {
+    std::optional<::buddy::ime::TileShape> shape =
+        ::buddy::ime::findTileShapeMN(shapes, accTy.getDimSize(0),
+                                      accTy.getDimSize(1), isFloat);
+    if (!shape || k > shape->k)
+      continue;
+    bool full = k == shape->k;
     Value a = lhs, bt = rhs;
-    if (shape.isFloat) {
+    if (isFloat) {
       a = getExtendedF16(lhs);
       bt = getExtendedF16(rhs);
       if (!a || !bt)
         continue;
     }
+    Type in =
+        isFloat ? Type(Float16Type::get(ctx)) : Type(IntegerType::get(ctx, 8));
+    Type out =
+        isFloat ? Type(Float32Type::get(ctx)) : Type(IntegerType::get(ctx, 32));
+    // B as stored: N x K under the form's transpose, or (K-short only) a
+    // direct K x N load that the widening reads transposed.
+    Value b;
     auto transpose = bt.getDefiningOp<linalg::TransposeOp>();
-    if (!transpose || !transpose.hasPureTensorSemantics() ||
-        transpose.getPermutation() != ArrayRef<int64_t>{1, 0})
+    if (transpose && transpose.hasPureTensorSemantics() &&
+        transpose.getPermutation() == ArrayRef<int64_t>{1, 0}) {
+      b = transpose.getInput();
+      if (!isTileType(b, {shape->n, k}, in))
+        continue;
+    } else if (!full && isTileType(bt, {k, shape->n}, in)) {
+      b = bt;
+    } else {
       continue;
-    Type in = shape.isFloat ? Type(Float16Type::get(ctx))
-                            : Type(IntegerType::get(ctx, 8));
-    Type out = shape.isFloat ? Type(Float32Type::get(ctx))
-                             : Type(IntegerType::get(ctx, 32));
-    if (!isTileType(a, {shape.m, shape.k}, in) ||
-        !isTileType(transpose.getInput(), {shape.n, shape.k}, in) ||
-        !isTileType(acc, {shape.m, shape.n}, out))
+    }
+    if (!isTileType(a, {shape->m, k}, in) ||
+        !isTileType(acc, {shape->m, shape->n}, out))
       continue;
+    if (!full) {
+      // Both operands are loads of views a full-K tile can be read from.
+      std::optional<::buddy::ime::TileOperand> ta =
+          ::buddy::ime::traceTileOperand(lhs, 0);
+      std::optional<::buddy::ime::TileOperand> tb =
+          ::buddy::ime::traceTileOperand(rhs, 1);
+      if (!ta || !tb || ta->load.op->getResult(0) != a ||
+          tb->load.op->getResult(0) != b ||
+          !isa<bufferization::ToTensorOp>(ta->load.op) ||
+          !isa<bufferization::ToTensorOp>(tb->load.op) ||
+          !::buddy::ime::canWidenAlongK(*ta, shape->k) ||
+          !::buddy::ime::canWidenAlongK(*tb, shape->k))
+        continue;
+      if (loads) {
+        loads[0] = a;
+        loads[1] = b;
+      }
+    }
+    if (kTile)
+      *kTile = shape->k;
     return TileDot{lhs, rhs, acc,
-                   matmul.getCast() == linalg::TypeFn::cast_unsigned,
-                   shape.isFloat};
+                   matmul.getCast() == linalg::TypeFn::cast_unsigned, isFloat};
   }
   return std::nullopt;
+}
+
+/// True when every reader of `v`, through the extensions and B's transpose a
+/// tile dot form has, is operand `index` of a K-short tile dot of tile K
+/// `kTile`.
+bool readOnlyByShortTileDots(Value v, unsigned index, int64_t kTile,
+                             ArrayRef<::buddy::ime::TileShape> shapes) {
+  for (OpOperand &use : v.getUses()) {
+    Operation *user = use.getOwner();
+    if (auto matmul = dyn_cast<linalg::MatmulOp>(user)) {
+      int64_t k = 0;
+      Value loads[2];
+      if (use.getOperandNumber() != index ||
+          !matchTileDotForm(matmul, shapes, &k, loads) || k != kTile ||
+          !loads[index])
+        return false;
+      continue;
+    }
+    if (auto transpose = dyn_cast<linalg::TransposeOp>(user)) {
+      if (index != 1 || !readOnlyByShortTileDots(transpose->getResult(0), index,
+                                                 kTile, shapes))
+        return false;
+      continue;
+    }
+    if (user->getNumResults() != 1 || getExtendedF16(user->getResult(0)) != v ||
+        !readOnlyByShortTileDots(user->getResult(0), index, kTile, shapes))
+      return false;
+  }
+  return true;
+}
+
+/// `shortLoads`, if given, receives the operand loads of a K-short match.
+std::optional<TileDot>
+matchTileDot(linalg::MatmulOp matmul, ArrayRef<::buddy::ime::TileShape> shapes,
+             SmallVectorImpl<Value> *shortLoads = nullptr) {
+  int64_t kTile = 0;
+  Value loads[2];
+  std::optional<TileDot> dot = matchTileDotForm(matmul, shapes, &kTile, loads);
+  if (!dot || !loads[0])
+    return dot;
+  for (unsigned i = 0; i < 2; ++i)
+    if (!readOnlyByShortTileDots(loads[i], i, kTile, shapes))
+      return std::nullopt;
+  if (shortLoads)
+    shortLoads->append({loads[0], loads[1]});
+  return dot;
 }
 
 /// True when every reader of `v` ends in the B operand of tile products:
@@ -424,6 +522,19 @@ void ConvertTileTensorToVectorPass::analyze(
         block(v, op->getLoc(), reason);
   };
 
+  // Loads of K-short tile dots are read whatever their strides: the K
+  // widening replaces each by a masked full-K read before any lowering.
+  llvm::SmallDenseSet<Value> shortTileLoads;
+  if (allowIMETileContracts) {
+    SmallVector<::buddy::ime::TileShape, 2> shapes =
+        ::buddy::ime::getTileShapes(target);
+    func.walk([&](linalg::MatmulOp matmul) {
+      SmallVector<Value, 2> loads;
+      if (matchTileDot(matmul, shapes, &loads))
+        shortTileLoads.insert(loads.begin(), loads.end());
+    });
+  }
+
   func.walk<WalkOrder::PreOrder>([&](Operation *op) {
     if (isSource(op))
       return;
@@ -435,8 +546,9 @@ void ConvertTileTensorToVectorPass::analyze(
     } else if (auto load = dyn_cast<bufferization::ToTensorOp>(op)) {
       auto tensorTy = cast<ShapedType>(load.getType());
       uniteAll({load.getResult()});
-      if (classifyMemref(stripCasts(load.getBuffer()), tensorTy) ==
-          Access::None)
+      if (!shortTileLoads.contains(load.getResult()) &&
+          classifyMemref(stripCasts(load.getBuffer()), tensorTy) ==
+              Access::None)
         block(load.getResult(), op->getLoc(),
               "load source is not row-major with unit innermost stride");
       return;
