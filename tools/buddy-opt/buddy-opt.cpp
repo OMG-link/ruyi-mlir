@@ -144,6 +144,7 @@ void registerEliminateMemRefCopyPass();
 void registerConvertTileTensorToVectorPass();
 void registerFlattenVectorTilesPass();
 void registerLowerVectorContractToIMETilePass();
+void registerPromoteIMETileKPass();
 void registerTestIMETileOperandsPass();
 void registerLowerCpuSchedBarrierPass();
 void registerEliminateLargeZeroConstantsPass();
@@ -215,6 +216,7 @@ int main(int argc, char **argv) {
   mlir::buddy::registerConvertTileTensorToVectorPass();
   mlir::buddy::registerFlattenVectorTilesPass();
   mlir::buddy::registerLowerVectorContractToIMETilePass();
+  mlir::buddy::registerPromoteIMETileKPass();
   mlir::buddy::registerTestIMETileOperandsPass();
   mlir::buddy::registerLowerCpuSchedBarrierPass();
   mlir::buddy::registerStaticizeMemRefLayoutPass();

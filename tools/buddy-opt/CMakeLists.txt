@@ -81,6 +81,7 @@ target_link_libraries(buddy-opt
   ConvertTileTensorToVectorPass
   FlattenVectorTilesPass
   LowerVectorContractToIMETilePass
+  PromoteIMETileKPass
   LowerCpuSchedBarrierPass
   StaticizeMemRefLayoutPass
   EliminateMemRefCopyPass
