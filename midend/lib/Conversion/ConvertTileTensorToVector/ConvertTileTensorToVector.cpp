@@ -201,12 +201,15 @@ bool isElementwiseGeneric(linalg::GenericOp generic, std::string &reason) {
 /// transpose.
 ///
 /// A product whose K is below the tile's also matches when it can be read as
-/// a full-K tile under a mask (`--promote-ime-tile-k` widens it later): both
-/// operands come straight from `bufferization.to_tensor` loads, with only the
-/// form's own extension and transpose in between, whose views
-/// `canWidenAlongK` accepts; B may then also be a direct K x N load. Every
-/// reader of those loads must be such a product, at the same operand and the
-/// same tile K, so widening the load changes no other value.
+/// a full-K tile under a mask (`--promote-ime-tile-k` widens it later): each
+/// operand traces (`Dialect/IME/TileOperands.h`) from the form's extension
+/// and transpose to a `bufferization.to_tensor` load whose view
+/// `canWidenAlongK` accepts. B may then also be a direct K x N load, read by
+/// the form's extension itself (fp16) or by the product (int8), since the
+/// widening transposes it right after the read. Every reader of those loads,
+/// through transparent steps, must be such a product, at the same operand,
+/// with the same tile K and B orientation, so widening the load changes no
+/// other value.
 struct TileDot {
   Value lhs, rhs, acc;
   bool isUnsigned;
@@ -235,7 +238,7 @@ Value getExtendedF16(Value v) {
 std::optional<TileDot>
 matchTileDotForm(linalg::MatmulOp matmul,
                  ArrayRef<::buddy::ime::TileShape> shapes, int64_t *kTile,
-                 Value *loads) {
+                 Value *loads, bool *bTransposed = nullptr) {
   if (!matmul.hasPureTensorSemantics() || matmul.hasUserDefinedMaps())
     return std::nullopt;
   MLIRContext *ctx = matmul.getContext();
@@ -289,17 +292,20 @@ matchTileDotForm(linalg::MatmulOp matmul,
           ::buddy::ime::traceTileOperand(lhs, 0);
       std::optional<::buddy::ime::TileOperand> tb =
           ::buddy::ime::traceTileOperand(rhs, 1);
-      if (!ta || !tb || ta->load.op->getResult(0) != a ||
-          tb->load.op->getResult(0) != b ||
+      bool direct = b == bt;
+      if (!ta || !tb || tb->transposed == direct ||
+          (direct && tb->load.op->getResult(0) != b) ||
           !isa<bufferization::ToTensorOp>(ta->load.op) ||
           !isa<bufferization::ToTensorOp>(tb->load.op) ||
           !::buddy::ime::canWidenAlongK(*ta, shape->k) ||
           !::buddy::ime::canWidenAlongK(*tb, shape->k))
         continue;
       if (loads) {
-        loads[0] = a;
-        loads[1] = b;
+        loads[0] = ta->load.op->getResult(0);
+        loads[1] = tb->load.op->getResult(0);
       }
+      if (bTransposed)
+        *bTransposed = tb->transposed;
     }
     if (kTile)
       *kTile = shape->k;
@@ -309,31 +315,35 @@ matchTileDotForm(linalg::MatmulOp matmul,
   return std::nullopt;
 }
 
-/// True when every reader of `v`, through the extensions and B's transpose a
-/// tile dot form has, is operand `index` of a K-short tile dot of tile K
-/// `kTile`.
-bool readOnlyByShortTileDots(Value v, unsigned index, int64_t kTile,
+/// True when every reader of `load`, through transparent steps and B's
+/// transpose, is operand `index` of a K-short tile dot of tile K `kTile` that
+/// reads it as its load, with B transposed iff `bTransposed`.
+bool readOnlyByShortTileDots(Value load, unsigned index, int64_t kTile,
+                             bool bTransposed,
                              ArrayRef<::buddy::ime::TileShape> shapes) {
-  for (OpOperand &use : v.getUses()) {
-    Operation *user = use.getOwner();
-    if (auto matmul = dyn_cast<linalg::MatmulOp>(user)) {
-      int64_t k = 0;
-      Value loads[2];
-      if (use.getOperandNumber() != index ||
-          !matchTileDotForm(matmul, shapes, &k, loads) || k != kTile ||
-          !loads[index])
-        return false;
+  SmallVector<Value> worklist{load};
+  llvm::SmallPtrSet<Value, 8> seen;
+  while (!worklist.empty()) {
+    Value v = worklist.pop_back_val();
+    if (!seen.insert(v).second)
       continue;
-    }
-    if (auto transpose = dyn_cast<linalg::TransposeOp>(user)) {
-      if (index != 1 || !readOnlyByShortTileDots(transpose->getResult(0), index,
-                                                 kTile, shapes))
+    for (OpOperand &use : v.getUses()) {
+      if (auto matmul = dyn_cast<linalg::MatmulOp>(use.getOwner())) {
+        int64_t k = 0;
+        Value loads[2];
+        bool transposed = false;
+        if (use.getOperandNumber() != index ||
+            !matchTileDotForm(matmul, shapes, &k, loads, &transposed) ||
+            k != kTile || loads[index] != load ||
+            (index == 1 && transposed != bTransposed))
+          return false;
+        continue;
+      }
+      Value forwarded = ::buddy::ime::getForwardedValue(use);
+      if (!forwarded)
         return false;
-      continue;
+      worklist.push_back(forwarded);
     }
-    if (user->getNumResults() != 1 || getExtendedF16(user->getResult(0)) != v ||
-        !readOnlyByShortTileDots(user->getResult(0), index, kTile, shapes))
-      return false;
   }
   return true;
 }
@@ -344,11 +354,13 @@ matchTileDot(linalg::MatmulOp matmul, ArrayRef<::buddy::ime::TileShape> shapes,
              SmallVectorImpl<Value> *shortLoads = nullptr) {
   int64_t kTile = 0;
   Value loads[2];
-  std::optional<TileDot> dot = matchTileDotForm(matmul, shapes, &kTile, loads);
+  bool bTransposed = false;
+  std::optional<TileDot> dot =
+      matchTileDotForm(matmul, shapes, &kTile, loads, &bTransposed);
   if (!dot || !loads[0])
     return dot;
   for (unsigned i = 0; i < 2; ++i)
-    if (!readOnlyByShortTileDots(loads[i], i, kTile, shapes))
+    if (!readOnlyByShortTileDots(loads[i], i, kTile, bTransposed, shapes))
       return std::nullopt;
   if (shortLoads)
     shortLoads->append({loads[0], loads[1]});

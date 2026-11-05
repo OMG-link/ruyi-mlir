@@ -187,3 +187,4 @@ func.func @full_k_direct_b(%a: memref<8x16xi8>, %b: memref<16x8xi8>,
   bufferization.materialize_in_destination %m in writable %c : (tensor<8x8xi32>, memref<8x8xi32>) -> ()
   return
 }
+

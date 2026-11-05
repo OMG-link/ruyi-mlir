@@ -18,19 +18,27 @@
 // tile dot, at the tensor level (`linalg.matmul`) and at the vector level
 // (`vector.contract`).
 //
-// An operand is traced from the product back to the load that produces it:
+// An operand is traced from the product back to the load that produces it,
+// through transparent steps and, for B, at most one 2-D transpose:
 //
-//   load -> zero-preserving casts -> [transpose -> zero-preserving casts]
-//        -> product
+//   load -> (transparent step | [B] transpose)* -> product
 //
-// A zero-preserving cast is an elementwise single-input cast (an op with
-// `CastOpInterface`, such as extf, extsi or bitcast), which maps 0 to 0. At
-// the tensor level it is an all-parallel identity-map `linalg.generic` whose
-// body is that one cast on its block argument. The transpose is the one the
-// tile dot form itself has on its B operand; no other shape op is traced.
-// Uses are left to the caller: a traced value may feed several products (CSE
-// shares a scale operand between them), and a rewrite of the chain has to
-// account for every one of them.
+// A transparent step keeps every element's value or maps 0 to 0, so a load
+// that reads zeros in new places still gives zeros there at the product:
+//
+//   * A zero-preserving cast: an elementwise single-input cast (an op with
+//     `CastOpInterface`, such as extf, extsi or bitcast). At the tensor level
+//     it is an all-parallel identity-map `linalg.generic` whose body is that
+//     one cast on its block argument.
+//   * A value-identity op: a `cpu.sched_barrier` result, from its operand; an
+//     `scf.for` iter_arg, from its init, when the loop yields it back
+//     unchanged (through value-identity ops only) and its loop result is
+//     unused.
+//
+// No other shape op is traced. Uses are left to the caller: a traced value
+// may feed several products (CSE shares a scale operand between them), and a
+// rewrite of the chain has to account for every one of them;
+// `getForwardedValue` gives the value a use carries on to.
 //
 // The load is `bufferization.to_tensor` of a ranked memref view, or an
 // unmasked, in-bounds, minor-identity `vector.transfer_read` of one. From its
@@ -59,12 +67,22 @@ namespace ime {
 /// input; otherwise a null value.
 mlir::Value getZeroPreservingCastInput(mlir::Value v);
 
-/// Walks up zero-preserving casts from `v` and returns the first value that is
-/// not such a cast. `chain`, if given, receives the values from `v` upwards,
-/// excluding the returned one.
+/// If `v` is the result of a transparent step, returns its input; otherwise
+/// a null value.
+mlir::Value getTransparentInput(mlir::Value v);
+
+/// The value `use` carries its operand on to through a transparent step or a
+/// 2-D transpose, if it does: the cast, barrier or transpose result, or the
+/// iter_arg of an `scf.for` init or yield operand. Otherwise a null value.
+mlir::Value getForwardedValue(mlir::OpOperand &use);
+
+/// Walks up transparent steps from `v` and returns the first value that is
+/// not one. `chain`, if given, receives the values from `v` upwards,
+/// excluding the returned one, and the values an iter_arg on the way is
+/// yielded back through.
 mlir::Value
-traceZeroPreservingCasts(mlir::Value v,
-                         llvm::SmallVectorImpl<mlir::Value> *chain = nullptr);
+traceTransparentSteps(mlir::Value v,
+                      llvm::SmallVectorImpl<mlir::Value> *chain = nullptr);
 
 /// A tensor or vector load of a whole static-stride memref view.
 struct TileLoad {
@@ -86,7 +104,9 @@ struct TileOperand {
   /// Whether the trace passed the tile dot's own transpose of B.
   bool transposed;
   /// The values between the load result (excluded) and the product operand
-  /// (included), from the operand upwards.
+  /// (included), from the operand upwards, plus the values that yield an
+  /// iter_arg on the way back to its loop. Every one of them has the load's
+  /// shape, transposed after the transpose.
   llvm::SmallVector<mlir::Value> chain;
 };
 

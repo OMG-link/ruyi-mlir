@@ -21,31 +21,39 @@
 //
 //   C(M x N) + sum_k ext(A[m,k]) * ext(B'[k,n]),  k < K
 //
-// where A is an unmasked read of an (M, k) view and B' is either the
-// transpose of a read of an (N, k) view or a read of a (k, N) view. Each
-// read becomes a masked read of the same address as an (M, K) or (N, K)
-// view with strides (K, 1), the mask covering the original k columns and
-// padding 0, which `canWidenAlongK` (`Dialect/IME/TileOperands.h`) decides
-// is the same data. The extra K columns are zero on both sides, so their
-// products add nothing. B is then transposed and extended, A extended, and
-// the contraction runs over K.
+// where ext(A) is the extension of a value that traces
+// (`Dialect/IME/TileOperands.h`) to an unmasked read of an (M, k) view, and
+// ext(B') is either the extension of a transpose of a value that traces to
+// a read of an (N, k) view, or the extension of a read of a (k, N) view
+// itself. Each read becomes a masked read of the same address as an (M, K)
+// or (N, K) view with strides (K, 1), the mask covering the original k
+// columns and padding 0, which `canWidenAlongK` decides is the same data; a
+// (k, N) read is transposed right after. Every value on the traced path,
+// casts, `cpu.sched_barrier` results and `scf.for` iter_args included, is
+// then retyped in place to the full K, and the contraction runs over K. The
+// extra K columns are zero on both sides and every step on the path keeps
+// zero, so their products add nothing.
 //
 // A read is widened once for every product that reads it, and only when
-// every reader is such a product, at the same operand and with the same
-// tile K; otherwise none of them is. The products are only rewritten when
-// the result is the tile form the IME lowering takes: plain matmul maps, an
-// add, the same extension on both operands (extsi or extui from i8 into an
-// i32 C, extf from f16 into an f32 C) and a tile shape of the target.
+// every reader, through the path, is such a product, at the same operand,
+// with the same tile K, B orientation and extension; otherwise none of them
+// is. The products are only rewritten when the result is the tile form the
+// IME lowering takes: plain matmul maps, an add, the same extension on both
+// operands (extsi or extui from i8 into an i32 C, extf from f16 into an f32
+// C) right at the product, B's transpose right below it, and a tile shape of
+// the target.
 //
 //===----------------------------------------------------------------------===//
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/Pass/Pass.h"
 
+#include "Dialect/Cpu/CpuOps.h"
 #include "Dialect/IME/TileOperands.h"
 #include "Dialect/IME/TileShapes.h"
 #include "Utils/TargetInfo.h"
@@ -60,7 +68,7 @@ namespace {
 /// One operand of a K-short tile product.
 struct KShortOperand {
   ::buddy::ime::TileOperand trace;
-  /// The extension between the read and the product.
+  /// The extension right at the product.
   Operation *ext;
 };
 
@@ -71,19 +79,12 @@ struct KShortProduct {
   ::buddy::ime::TileShape shape;
 };
 
-/// The one extension op of an operand chain, if the chain is exactly that
-/// extension (and, for B, the transpose).
-Operation *getOnlyExtension(const ::buddy::ime::TileOperand &trace) {
-  Operation *ext = nullptr;
-  for (Value v : trace.chain) {
-    Operation *def = v.getDefiningOp();
-    if (isa<vector::TransposeOp>(def))
-      continue;
-    if (ext || !isa<arith::ExtSIOp, arith::ExtUIOp, arith::ExtFOp>(def))
-      return nullptr;
-    ext = def;
-  }
-  return ext;
+/// The extension that defines `v`, if one the tile dots take.
+Operation *getTileExtension(Value v) {
+  Operation *def = v.getDefiningOp();
+  return isa_and_nonnull<arith::ExtSIOp, arith::ExtUIOp, arith::ExtFOp>(def)
+             ? def
+             : nullptr;
 }
 
 std::optional<KShortProduct>
@@ -108,13 +109,22 @@ matchKShortProduct(vector::ContractionOp contract,
   product.contract = contract;
   Value operands[] = {contract.getLhs(), contract.getRhs()};
   for (unsigned i = 0; i < 2; ++i) {
+    Operation *ext = getTileExtension(operands[i]);
+    if (!ext)
+      return std::nullopt;
     std::optional<::buddy::ime::TileOperand> trace =
         ::buddy::ime::traceTileOperand(operands[i], i);
     if (!trace || !isa<vector::TransferReadOp>(trace->load.op))
       return std::nullopt;
-    Operation *ext = getOnlyExtension(*trace);
-    if (!ext)
-      return std::nullopt;
+    if (i == 1) {
+      // The lowering reads B as ext(transpose(B)). A transposed path must
+      // end in that transpose; a direct one is the read itself, which the
+      // widening transposes.
+      Value in = ext->getOperand(0);
+      auto transpose = in.getDefiningOp<vector::TransposeOp>();
+      if (trace->transposed ? !transpose : in != trace->load.op->getResult(0))
+        return std::nullopt;
+    }
     product.operands[i] = {*trace, ext};
   }
   Operation *extA = product.operands[0].ext;
@@ -125,8 +135,8 @@ matchKShortProduct(vector::ContractionOp contract,
   Type in = isFloat ? Type(Float16Type::get(ctx)) : IntegerType::get(ctx, 8);
   Type out = isFloat ? Type(Float32Type::get(ctx)) : IntegerType::get(ctx, 32);
   if (accTy.getElementType() != out ||
-      product.operands[0].trace.load.type.getElementType() != in ||
-      product.operands[1].trace.load.type.getElementType() != in ||
+      getElementTypeOrSelf(extA->getOperand(0)) != in ||
+      getElementTypeOrSelf(extB->getOperand(0)) != in ||
       getElementTypeOrSelf(extA->getResult(0)) != out ||
       getElementTypeOrSelf(extB->getResult(0)) != out)
     return std::nullopt;
@@ -224,9 +234,10 @@ public:
               if (auto contract = dyn_cast<vector::ContractionOp>(user)) {
                 if (!kept.contains(contract) || use.getOperandNumber() != i)
                   return false;
-              } else if (user->getNumResults() != 1 ||
-                         claims.lookup(user->getResult(0)) != claim) {
-                return false;
+              } else {
+                Value forwarded = ::buddy::ime::getForwardedValue(use);
+                if (!forwarded || claims.lookup(forwarded) != claim)
+                  return false;
               }
             }
           }
@@ -239,37 +250,39 @@ public:
       changed = products.size() != before;
     }
 
-    // Widen each read once, then rebuild each product on the widened reads.
-    DenseMap<Value, Value> widened;
+    // Widen each read once, retype every path value in place, then rebuild
+    // each product over the full K.
+    llvm::SetVector<Value> pending;
+    llvm::SmallPtrSet<Value, 16> ready;
+    llvm::SmallPtrSet<Operation *, 8> widenedReads;
     OpBuilder b(&getContext());
-    for (KShortProduct &p : products) {
-      Value operands[2];
+    for (const KShortProduct &p : products)
       for (unsigned i = 0; i < 2; ++i) {
         const KShortOperand &operand = p.operands[i];
-        Value read = operand.trace.load.op->getResult(0);
-        Value &w = widened[read];
-        if (!w)
-          w = widen(b, operand, i, p.shape);
-        operands[i] = w;
+        pending.insert(operand.trace.chain.begin(), operand.trace.chain.end());
+        Operation *read = operand.trace.load.op;
+        if (!widenedReads.insert(read).second)
+          continue;
+        Value w = widen(b, operand, i, p.shape);
+        read->getResult(0).replaceAllUsesWith(w);
+        read->erase();
+        ready.insert(w);
       }
+    retype(b, pending, ready);
+    for (KShortProduct &p : products) {
       b.setInsertionPoint(p.contract);
       auto res = vector::ContractionOp::create(
-          b, p.contract.getLoc(), operands[0], operands[1], p.contract.getAcc(),
-          p.contract.getIndexingMaps(), p.contract.getIteratorTypes(),
-          p.contract.getKind());
+          b, p.contract.getLoc(), p.contract.getLhs(), p.contract.getRhs(),
+          p.contract.getAcc(), p.contract.getIndexingMaps(),
+          p.contract.getIteratorTypes(), p.contract.getKind());
       p.contract.replaceAllUsesWith(res.getResult());
       p.contract.erase();
     }
-    // The old reads and chains are dead now.
-    SmallVector<Operation *> reads;
-    for (auto &entry : widened)
-      reads.push_back(entry.first.getDefiningOp());
-    eraseDeadChains(reads);
   }
 
 private:
-  /// The extended operand `index` reads at full K: a masked (rows, K) read
-  /// of the same address, then for B the transpose, then the extension.
+  /// What operand `index`'s read becomes at full K: a masked (rows, K) read
+  /// of the same address, transposed for a direct (k, N) B.
   Value widen(OpBuilder &b, const KShortOperand &operand, unsigned index,
               const ::buddy::ime::TileShape &shape) {
     auto read = cast<vector::TransferReadOp>(operand.trace.load.op);
@@ -303,41 +316,64 @@ private:
         ValueRange{c0, c0}, padding, ArrayRef<bool>{true, true});
     wideRead.getMaskMutable().assign(mask);
     Value v = wideRead.getResult();
-    if (index == 1)
+    // A (k, N) read is now its (N, K) storage; the path expects (K, N).
+    if (index == 1 && !operand.trace.transposed)
       v = vector::TransposeOp::create(b, loc, v, ArrayRef<int64_t>{1, 0});
-    Type wide =
-        VectorType::get(cast<VectorType>(v.getType()).getShape(),
-                        getElementTypeOrSelf(operand.ext->getResult(0)));
-    OperationState state(loc, operand.ext->getName(), ValueRange{v},
-                         TypeRange{wide}, operand.ext->getAttrs());
-    return b.create(state)->getResult(0);
+    return v;
   }
 
-  /// Erases the old reads and everything between them and the products,
-  /// users first.
-  void eraseDeadChains(ArrayRef<Operation *> reads) {
-    llvm::SetVector<Operation *> all;
-    SmallVector<Operation *> worklist(reads);
-    while (!worklist.empty()) {
-      Operation *op = worklist.pop_back_val();
-      if (!all.insert(op))
+  /// Retypes the path values `pending` once their input is `ready`: a cast
+  /// or transpose is rebuilt on its widened input, a barrier result and an
+  /// iter_arg (with its unused loop result) take their input's type.
+  void retype(OpBuilder &b, llvm::SetVector<Value> &pending,
+              llvm::SmallPtrSet<Value, 16> &ready) {
+    while (!pending.empty()) {
+      Value next, input;
+      for (Value v : pending) {
+        Value in = ::buddy::ime::getTransparentInput(v);
+        if (!in)
+          if (auto transpose = v.getDefiningOp<vector::TransposeOp>())
+            in = transpose.getVector();
+        assert(in && "a path value has no input");
+        if (ready.contains(in)) {
+          next = v;
+          input = in;
+          break;
+        }
+      }
+      if (!next)
+        llvm_unreachable("a path value's input is never widened");
+      pending.remove(next);
+      auto inputTy = cast<VectorType>(input.getType());
+      if (auto arg = dyn_cast<BlockArgument>(next)) {
+        auto forOp = cast<scf::ForOp>(arg.getOwner()->getParentOp());
+        arg.setType(inputTy);
+        forOp.getTiedLoopResult(arg).setType(inputTy);
+        ready.insert(next);
         continue;
-      for (Operation *user : op->getUsers())
-        worklist.push_back(user);
-    }
-    // Every reader was checked to be in the chain or a rewritten product,
-    // so erasing users first empties the whole set.
-    SmallVector<Operation *> order(all.begin(), all.end());
-    while (!order.empty()) {
-      size_t before = order.size();
-      llvm::erase_if(order, [](Operation *op) {
-        if (!op->use_empty())
-          return false;
-        op->erase();
-        return true;
-      });
-      if (order.size() == before)
-        llvm_unreachable("a widened read still has a reader");
+      }
+      Operation *def = next.getDefiningOp();
+      if (isa<::buddy::cpu::SchedBarrierOp>(def)) {
+        next.setType(inputTy);
+        ready.insert(next);
+        continue;
+      }
+      // A cast keeps its element type; a transpose swaps the shape.
+      b.setInsertionPoint(def);
+      Value rebuilt;
+      if (auto transpose = dyn_cast<vector::TransposeOp>(def)) {
+        rebuilt = vector::TransposeOp::create(b, def->getLoc(), input,
+                                              transpose.getPermutation());
+      } else {
+        Type type = VectorType::get(inputTy.getShape(),
+                                    getElementTypeOrSelf(next.getType()));
+        OperationState state(def->getLoc(), def->getName(), ValueRange{input},
+                             TypeRange{type}, def->getAttrs());
+        rebuilt = b.create(state)->getResult(0);
+      }
+      next.replaceAllUsesWith(rebuilt);
+      def->erase();
+      ready.insert(rebuilt);
     }
   }
 };

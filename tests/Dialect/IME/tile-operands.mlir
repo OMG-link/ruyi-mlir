@@ -112,3 +112,39 @@ func.func @no_tile(%a: tensor<3x4xi8>, %b: tensor<4x5xi8>) -> tensor<3x5xi32> {
   %r = linalg.matmul ins(%a, %b : tensor<3x4xi8>, tensor<4x5xi8>) outs(%c0 : tensor<3x5xi32>) -> tensor<3x5xi32>
   return %r : tensor<3x5xi32>
 }
+
+// B carried as an iter_arg through a barrier traces to the load before the
+// loop; its chain also holds the barrier result the loop yields back.
+// CHECK-LABEL: @loop_carried_b linalg.matmul 8x8x1 float: tile k=8
+// CHECK-NEXT: A: bufferization.to_tensor memref<8x1xf16, strided<[8, 1]>> row=0 k=1 transposed=0 chain=1 widen=1
+// CHECK-NEXT: B: bufferization.to_tensor memref<8x1xf16, strided<[8, 1]>> row=0 k=1 transposed=1 chain=4 widen=1
+func.func @loop_carried_b(%a: memref<8x1xf16, strided<[8, 1]>>,
+                          %b: memref<8x1xf16, strided<[8, 1]>>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %tb = bufferization.to_tensor %b restrict : memref<8x1xf16, strided<[8, 1]>> to tensor<8x1xf16>
+  %r = scf.for %i = %c0 to %n step %c1 iter_args(%wb = %tb) -> (tensor<8x1xf16>) {
+    %held = cpu.sched_barrier %wb : tensor<8x1xf16>
+    %ta = bufferization.to_tensor %a restrict : memref<8x1xf16, strided<[8, 1]>> to tensor<8x1xf16>
+    %eh = tensor.empty() : tensor<1x8xf16>
+    %bt = linalg.transpose ins(%held : tensor<8x1xf16>) outs(%eh : tensor<1x8xf16>) permutation = [1, 0]
+    %ea0 = tensor.empty() : tensor<8x1xf32>
+    %ea = linalg.generic {indexing_maps = [#id, #id], iterator_types = ["parallel", "parallel"]}
+        ins(%ta : tensor<8x1xf16>) outs(%ea0 : tensor<8x1xf32>) {
+    ^bb0(%x: f16, %y: f32):
+      %v = arith.extf %x : f16 to f32
+      linalg.yield %v : f32
+    } -> tensor<8x1xf32>
+    %eb0 = tensor.empty() : tensor<1x8xf32>
+    %eb = linalg.generic {indexing_maps = [#id, #id], iterator_types = ["parallel", "parallel"]}
+        ins(%bt : tensor<1x8xf16>) outs(%eb0 : tensor<1x8xf32>) {
+    ^bb0(%x: f16, %y: f32):
+      %v = arith.extf %x : f16 to f32
+      linalg.yield %v : f32
+    } -> tensor<1x8xf32>
+    %c = tensor.empty() : tensor<8x8xf32>
+    %m = linalg.matmul ins(%ea, %eb : tensor<8x1xf32>, tensor<1x8xf32>) outs(%c : tensor<8x8xf32>) -> tensor<8x8xf32>
+    scf.yield %held : tensor<8x1xf16>
+  }
+  return
+}

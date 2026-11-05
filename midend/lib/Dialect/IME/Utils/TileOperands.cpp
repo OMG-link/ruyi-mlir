@@ -16,11 +16,15 @@
 
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/Interfaces/CastInterfaces.h"
 #include "mlir/Pass/Pass.h"
 
+#include "llvm/ADT/SetVector.h"
+
+#include "Dialect/Cpu/CpuOps.h"
 #include "Dialect/IME/TileOperands.h"
 
 using namespace mlir;
@@ -60,10 +64,92 @@ Value getZeroPreservingCastInput(Value v) {
   return generic.getDpsInputs()[0];
 }
 
-Value traceZeroPreservingCasts(Value v, SmallVectorImpl<Value> *chain) {
-  while (Value input = getZeroPreservingCastInput(v)) {
-    if (chain)
+/// The operand a `cpu.sched_barrier` result holds, or a null value.
+static Value getBarrierInput(Value v) {
+  auto result = dyn_cast<OpResult>(v);
+  if (!result)
+    return {};
+  auto barrier = dyn_cast<::buddy::cpu::SchedBarrierOp>(result.getOwner());
+  return barrier ? barrier.getInputs()[result.getResultNumber()] : Value();
+}
+
+/// The init of `arg` if it is an `scf.for` iter_arg the loop yields back
+/// unchanged, through barriers only, and whose loop result is unused.
+/// `yielded` receives the values between the yield operand (included) and
+/// `arg` (excluded).
+static Value getLoopCarriedInit(BlockArgument arg,
+                                SmallVectorImpl<Value> *yielded) {
+  auto forOp = dyn_cast<scf::ForOp>(arg.getOwner()->getParentOp());
+  if (!forOp)
+    return {};
+  OpOperand *init = forOp.getTiedLoopInit(arg);
+  if (!init || !forOp.getTiedLoopResult(arg).use_empty())
+    return {};
+  SmallVector<Value> path;
+  Value back = forOp.getTiedLoopYieldedValue(arg)->get();
+  while (back != arg) {
+    path.push_back(back);
+    back = getBarrierInput(back);
+    if (!back)
+      return {};
+  }
+  if (yielded)
+    yielded->append(path);
+  return init->get();
+}
+
+static Value getValueIdentityInput(Value v, SmallVectorImpl<Value> *yielded) {
+  if (Value input = getBarrierInput(v))
+    return input;
+  if (auto arg = dyn_cast<BlockArgument>(v))
+    return getLoopCarriedInit(arg, yielded);
+  return {};
+}
+
+Value getTransparentInput(Value v) {
+  if (Value input = getZeroPreservingCastInput(v))
+    return input;
+  return getValueIdentityInput(v, nullptr);
+}
+
+Value getForwardedValue(OpOperand &use) {
+  Operation *user = use.getOwner();
+  if (auto barrier = dyn_cast<::buddy::cpu::SchedBarrierOp>(user))
+    return barrier.getResults()[use.getOperandNumber()];
+  if (auto forOp = dyn_cast<scf::ForOp>(user))
+    return forOp.getTiedLoopRegionIterArg(&use);
+  if (auto yield = dyn_cast<scf::YieldOp>(user)) {
+    auto forOp = dyn_cast<scf::ForOp>(yield->getParentOp());
+    return forOp ? forOp.getRegionIterArgs()[use.getOperandNumber()] : Value();
+  }
+  if (auto transpose = dyn_cast<vector::TransposeOp>(user))
+    return transpose.getPermutation() == ArrayRef<int64_t>{1, 0}
+               ? transpose.getResult()
+               : Value();
+  if (auto transpose = dyn_cast<linalg::TransposeOp>(user))
+    return use.get() == transpose.getInput() &&
+                   transpose.getPermutation() == ArrayRef<int64_t>{1, 0}
+               ? transpose->getResult(0)
+               : Value();
+  if (user->getNumResults() == 1 &&
+      getZeroPreservingCastInput(user->getResult(0)) == use.get())
+    return user->getResult(0);
+  return {};
+}
+
+Value traceTransparentSteps(Value v, SmallVectorImpl<Value> *chain) {
+  SmallPtrSet<Value, 8> seen;
+  while (seen.insert(v).second) {
+    SmallVector<Value> yielded;
+    Value input = getZeroPreservingCastInput(v);
+    if (!input)
+      input = getValueIdentityInput(v, &yielded);
+    if (!input)
+      return v;
+    if (chain) {
       chain->push_back(v);
+      chain->append(yielded);
+    }
     v = input;
   }
   return v;
@@ -95,7 +181,7 @@ std::optional<TileLoad> getTileLoad(Value v) {
 std::optional<TileOperand> traceTileOperand(Value operand, unsigned index) {
   assert(index < 2 && "a product has two operands");
   TileOperand result;
-  Value v = traceZeroPreservingCasts(operand, &result.chain);
+  Value v = traceTransparentSteps(operand, &result.chain);
   result.transposed = false;
   if (index == 1) {
     Value input;
@@ -108,13 +194,16 @@ std::optional<TileOperand> traceTileOperand(Value operand, unsigned index) {
     }
     if (input) {
       result.chain.push_back(v);
-      v = traceZeroPreservingCasts(input, &result.chain);
+      v = traceTransparentSteps(input, &result.chain);
       result.transposed = true;
     }
   }
   std::optional<TileLoad> load = getTileLoad(v);
   if (!load || load->type.getRank() != 2)
     return std::nullopt;
+  // A yield path may run along the operand's own path.
+  llvm::SetVector<Value> unique(result.chain.begin(), result.chain.end());
+  result.chain.assign(unique.begin(), unique.end());
   result.load = *load;
   // A is (M, K). B is (K, N) as given, or (N, K) under its transpose.
   bool rowFirst = index == 0 || result.transposed;

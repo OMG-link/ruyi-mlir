@@ -140,3 +140,69 @@ func.func @two_roles(%a: memref<8x1xf16, strided<[8, 1]>>,
   %s = vector.contract {indexing_maps = [#mk, #kn, #mn], iterator_types = ["parallel", "parallel", "reduction"], kind = #vector.kind<add>} %ea, %eb, %r : vector<8x1xf32>, vector<1x8xf32> into vector<8x8xf32>
   return %s : vector<8x8xf32>
 }
+
+// -----
+
+// The weight-stationary form: B is read once before the loop, carried as an
+// iter_arg through a cpu.sched_barrier and yielded back. The read before the
+// loop is widened and the iter_arg, the barrier and the yield take the full
+// K; A is read in the loop.
+// CHECK-LABEL: func.func @loop_carried_b
+// CHECK: %[[B:.+]] = vector.transfer_read {{.+}} : memref<8x8xf16, strided<[8, 1], offset: ?>>, vector<8x8xf16>
+// CHECK: scf.for {{.+}} iter_args(%[[ARG:.+]] = %[[B]], %{{.+}} = %{{.+}}) -> (vector<8x8xf16>, vector<8x8xf32>)
+// CHECK: %[[HELD:.+]] = cpu.sched_barrier %[[ARG]] : vector<8x8xf16>
+// CHECK: vector.transpose %[[HELD]], [1, 0] : vector<8x8xf16> to vector<8x8xf16>
+// CHECK: vector.contract {{.+}} : vector<8x8xf32>, vector<8x8xf32> into vector<8x8xf32>
+// CHECK: scf.yield %[[HELD]], %{{.+}} : vector<8x8xf16>, vector<8x8xf32>
+// TILE-LABEL: func.func @loop_carried_b
+// TILE: ime.tile.vfwmadot
+// TILE-NOT: vector.contract
+#mk = affine_map<(m, n, k) -> (m, k)>
+#kn = affine_map<(m, n, k) -> (k, n)>
+#mn = affine_map<(m, n, k) -> (m, n)>
+func.func @loop_carried_b(%a: memref<64xf16>, %b: memref<8x1xf16, strided<[8, 1], offset: ?>>,
+                          %acc: vector<8x8xf32>, %n: index) -> vector<8x8xf32> {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %p = arith.constant 0.0 : f16
+  %rb = vector.transfer_read %b[%c0, %c0], %p {in_bounds = [true, true]} : memref<8x1xf16, strided<[8, 1], offset: ?>>, vector<8x1xf16>
+  %r:2 = scf.for %i = %c0 to %n step %c1 iter_args(%wb = %rb, %c = %acc) -> (vector<8x1xf16>, vector<8x8xf32>) {
+    %held = cpu.sched_barrier %wb : vector<8x1xf16>
+    %va = memref.reinterpret_cast %a to offset: [%i], sizes: [8, 1], strides: [8, 1] : memref<64xf16> to memref<8x1xf16, strided<[8, 1], offset: ?>>
+    %ra = vector.transfer_read %va[%c0, %c0], %p {in_bounds = [true, true]} : memref<8x1xf16, strided<[8, 1], offset: ?>>, vector<8x1xf16>
+    %bt = vector.transpose %held, [1, 0] : vector<8x1xf16> to vector<1x8xf16>
+    %ea = arith.extf %ra : vector<8x1xf16> to vector<8x1xf32>
+    %eb = arith.extf %bt : vector<1x8xf16> to vector<1x8xf32>
+    %d = vector.contract {indexing_maps = [#mk, #kn, #mn], iterator_types = ["parallel", "parallel", "reduction"], kind = #vector.kind<add>} %ea, %eb, %c : vector<8x1xf32>, vector<1x8xf32> into vector<8x8xf32>
+    scf.yield %held, %d : vector<8x1xf16>, vector<8x8xf32>
+  }
+  return %r#1 : vector<8x8xf32>
+}
+
+// -----
+
+// The carried B is also read after the loop, which a wider carry would
+// change.
+// CHECK-LABEL: func.func @loop_result_used
+// CHECK: vector.contract {{.+}} : vector<8x1xf32>, vector<1x8xf32> into vector<8x8xf32>
+// TILE-LABEL: func.func @loop_result_used
+// TILE: vector.contract
+#mk = affine_map<(m, n, k) -> (m, k)>
+#kn = affine_map<(m, n, k) -> (k, n)>
+#mn = affine_map<(m, n, k) -> (m, n)>
+func.func @loop_result_used(%a: memref<8x1xf16, strided<[8, 1]>>, %b: memref<8x1xf16, strided<[8, 1]>>,
+                            %acc: vector<8x8xf32>, %n: index) -> (vector<8x8xf32>, vector<8x1xf16>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %p = arith.constant 0.0 : f16
+  %rb = vector.transfer_read %b[%c0, %c0], %p {in_bounds = [true, true]} : memref<8x1xf16, strided<[8, 1]>>, vector<8x1xf16>
+  %r:2 = scf.for %i = %c0 to %n step %c1 iter_args(%wb = %rb, %c = %acc) -> (vector<8x1xf16>, vector<8x8xf32>) {
+    %ra = vector.transfer_read %a[%c0, %c0], %p {in_bounds = [true, true]} : memref<8x1xf16, strided<[8, 1]>>, vector<8x1xf16>
+    %bt = vector.transpose %wb, [1, 0] : vector<8x1xf16> to vector<1x8xf16>
+    %ea = arith.extf %ra : vector<8x1xf16> to vector<8x1xf32>
+    %eb = arith.extf %bt : vector<1x8xf16> to vector<1x8xf32>
+    %d = vector.contract {indexing_maps = [#mk, #kn, #mn], iterator_types = ["parallel", "parallel", "reduction"], kind = #vector.kind<add>} %ea, %eb, %c : vector<8x1xf32>, vector<1x8xf32> into vector<8x8xf32>
+    scf.yield %wb, %d : vector<8x1xf16>, vector<8x8xf32>
+  }
+  return %r#1, %r#0 : vector<8x8xf32>, vector<8x1xf16>
+}

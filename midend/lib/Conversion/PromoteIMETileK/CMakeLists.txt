@@ -2,6 +2,7 @@ add_mlir_library(PromoteIMETileKPass
   PromoteIMETileK.cpp
 
   LINK_LIBS PUBLIC
+    BuddyCpu
     BuddyIMETileOperands
     BuddyTargetInfo
     MLIRArithDialect
@@ -9,5 +10,6 @@ add_mlir_library(PromoteIMETileKPass
     MLIRIR
     MLIRMemRefDialect
     MLIRPass
+    MLIRSCFDialect
     MLIRVectorDialect
 )
