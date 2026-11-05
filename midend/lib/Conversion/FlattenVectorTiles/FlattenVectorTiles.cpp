@@ -30,8 +30,10 @@
 //     the row extracts and inserts step 1 leaves) and scf.for iter_args are
 //     linearized. `vector.contract` and `vector.transpose`, which the
 //     linearizer does not cover, keep their n-D types with shape_casts at
-//     the boundary, for their own lowerings. `cpu.sched_barrier` holds the
-//     flattened values.
+//     the boundary, for their own lowerings. Neither are n-D
+//     `vector.create_mask` and `vector.constant_mask`: a flattened masked
+//     transfer reads its mask through a shape_cast. `cpu.sched_barrier`
+//     holds the flattened values.
 //
 //===----------------------------------------------------------------------===//
 
@@ -98,7 +100,11 @@ public:
     ConversionTarget target(*ctx);
     RewritePatternSet linearize(ctx);
     vector::populateForVectorLinearize(converter, target);
-    target.addLegalOp<vector::ContractionOp, vector::TransposeOp>();
+    // A masked transfer flattened in step 1 reads its mask through a
+    // shape_cast, which is linearized; the n-D mask itself stays for the
+    // vector lowering, which builds it per row.
+    target.addLegalOp<vector::ContractionOp, vector::TransposeOp,
+                      vector::CreateMaskOp, vector::ConstantMaskOp>();
     target.addDynamicallyLegalOp<::buddy::cpu::SchedBarrierOp>(
         [&](Operation *op) { return converter.isLegal(op); });
     linearize.add<LinearizeSchedBarrier>(converter, ctx);
