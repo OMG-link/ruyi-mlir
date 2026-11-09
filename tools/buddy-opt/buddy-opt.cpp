@@ -188,6 +188,7 @@ int main(int argc, char **argv) {
   mlir::buddy::registerCParDistributeLoopsPass();
   mlir::buddy::registerCParForallToParallelPass();
   mlir::buddy::registerCParOutlineToRuntimePass();
+  mlir::buddy::registerCpuTcmAssignPass();
   // Register gpu passes
   mlir::buddy::registerConvertMemcpyToGPUPass();
   mlir::buddy::registerLegalizeShmemOutliningPass();

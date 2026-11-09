@@ -95,6 +95,10 @@ void registerCParForallToParallelPass();
 /// --cpar-outline-to-runtime: outlines cpar.parallel regions (LLVM dialect)
 /// into functions called through __cpar_parallel.
 void registerCParOutlineToRuntimePass();
+/// --cpu-tcm-assign: places memref.alloc ops marked "cpu.tcm"
+/// (triton.language.extra.cpu.alloc) at static offsets of the TCM of the
+/// executing thread (before --finalize-memref-to-llvm).
+void registerCpuTcmAssignPass();
 } // namespace buddy
 } // namespace mlir
 
