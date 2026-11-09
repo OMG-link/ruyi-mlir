@@ -35,6 +35,7 @@
 // entirely or not at all.
 //
 //   bufferization.to_tensor             vector.transfer_read
+//   masked load (see below)             masked vector.transfer_read
 //   bufferization.materialize_in_dest.  vector.transfer_write
 //   linalg.fill                         vector.broadcast
 //   elementwise linalg.generic          its body on vectors
@@ -43,6 +44,13 @@
 //   scf.if tensor results               vector results and yields
 //   cpu.sched_barrier                   cpu.sched_barrier on vectors
 //   cpu.shuffle on tensors              vector.shuffle
+//
+// A Triton masked load reaches this pass as the valid prefix of a view read
+// through a subview and inserted at offset 0 into a fill of the view's shape
+// (`tensor.insert_slice (to_tensor (memref.subview V)) into (linalg.fill c)`).
+// It converts to one `vector.transfer_read` of V padded with c under a
+// `vector.create_mask` of the subview's sizes. The masked-off elements are not
+// read, so reading the whole of V is in bounds whatever the sizes.
 //
 // A `cpu.shuffle` joins both operands and its result. One that stays in tensors
 // lowers to a `linalg.generic` that reads each result element with
@@ -76,6 +84,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -83,6 +92,7 @@
 #include "mlir/Dialect/MemRef/Utils/MemRefUtils.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -402,6 +412,53 @@ bool isAbsorbedTranspose(linalg::TransposeOp transpose,
          feedsOnlyTileDotRhs(transpose->getResult(0), shapes);
 }
 
+/// The parts of a masked load as triton-shared writes it.
+struct MaskedLoad {
+  tensor::InsertSliceOp insert;
+  bufferization::ToTensorOp load;
+  memref::SubViewOp subview;
+  linalg::FillOp fill;
+};
+
+bool isZeroAndUnit(ArrayRef<OpFoldResult> offsets,
+                   ArrayRef<OpFoldResult> strides) {
+  return llvm::all_of(offsets,
+                      [](OpFoldResult o) { return isZeroInteger(o); }) &&
+         llvm::all_of(strides, [](OpFoldResult s) { return isOneInteger(s); });
+}
+
+/// `insert` as a masked load: the whole valid prefix of a subview of V, read
+/// with to_tensor and inserted at offset 0 into a fill whose shape is V's. The
+/// fill may be shared (CSE merges the fills of several masked loads); insert
+/// does not change it.
+std::optional<MaskedLoad> matchMaskedLoad(tensor::InsertSliceOp insert) {
+  auto fill = insert.getDest().getDefiningOp<linalg::FillOp>();
+  auto load = insert.getSource().getDefiningOp<bufferization::ToTensorOp>();
+  if (!fill || !load || !fill.hasPureTensorSemantics() ||
+      !load->getResult(0).hasOneUse())
+    return std::nullopt;
+  auto subview =
+      stripCasts(load.getBuffer()).getDefiningOp<memref::SubViewOp>();
+  if (!subview)
+    return std::nullopt;
+  auto resultTy = cast<RankedTensorType>(insert.getType());
+  MemRefType viewTy = subview.getSourceType();
+  if (!resultTy.hasStaticShape() || !viewTy.hasStaticShape() ||
+      viewTy.getShape() != resultTy.getShape() ||
+      viewTy.getElementType() != resultTy.getElementType() ||
+      subview.getType().getRank() != viewTy.getRank())
+    return std::nullopt;
+  if (!isZeroAndUnit(subview.getMixedOffsets(), subview.getMixedStrides()) ||
+      !isZeroAndUnit(insert.getMixedOffsets(), insert.getMixedStrides()))
+    return std::nullopt;
+  if (!llvm::equal(subview.getMixedSizes(), insert.getMixedSizes(),
+                   [](OpFoldResult a, OpFoldResult b) {
+                     return isEqualConstantIntOrValue(a, b);
+                   }))
+    return std::nullopt;
+  return MaskedLoad{insert, load, subview, fill};
+}
+
 /// Lowers a `cpu.shuffle` on tensors to a `linalg.generic` that computes each
 /// result element with `tensor.extract`: element (i, j...) reads mask[i] from
 /// a constant, then row mask[i] of v1 or row mask[i] - v1.shape[0] of v2. Both
@@ -552,6 +609,11 @@ private:
   bool isLegalType(Type t, const mlir::buddy::TargetInfo &target,
                    std::string &reason);
 
+  /// The to_tensor of each masked load and every fill read only by masked
+  /// loads, mapped to the insert_slices they feed. They convert with those
+  /// insert_slices, as masked reads, and are erased once all of them have.
+  DenseMap<Operation *, SmallVector<tensor::InsertSliceOp, 4>> absorbed;
+
   // ---- Rewrite -----------------------------------------------------------
   IRMapping mapping;
   SmallVector<Operation *> toErase;
@@ -614,12 +676,35 @@ void ConvertTileTensorToVectorPass::analyze(
     });
   }
 
+  absorbed.clear();
+  DenseMap<Operation *, SmallVector<tensor::InsertSliceOp, 4>> fills;
+  func.walk([&](tensor::InsertSliceOp insert) {
+    if (std::optional<MaskedLoad> ml = matchMaskedLoad(insert)) {
+      absorbed[ml->load].push_back(insert);
+      fills[ml->fill].push_back(insert);
+    }
+  });
+  for (auto &[fill, inserts] : fills)
+    if (static_cast<size_t>(llvm::range_size(fill->getResult(0).getUses())) ==
+        inserts.size())
+      absorbed[fill] = inserts;
+
   func.walk<WalkOrder::PreOrder>([&](Operation *op) {
-    if (isSource(op))
+    if (isSource(op) || absorbed.count(op))
       return;
     if (auto fill = dyn_cast<linalg::FillOp>(op)) {
       if (fill.hasPureTensorSemantics()) {
         uniteAll({fill.getResult(0)});
+        return;
+      }
+    } else if (auto insert = dyn_cast<tensor::InsertSliceOp>(op)) {
+      if (std::optional<MaskedLoad> ml = matchMaskedLoad(insert)) {
+        uniteAll({insert.getResult()});
+        if (classifyMemref(stripCasts(ml->subview.getSource()),
+                           insert.getType()) == Access::None)
+          block(insert.getResult(), op->getLoc(),
+                "masked load source is not row-major with unit innermost "
+                "stride");
         return;
       }
     } else if (auto load = dyn_cast<bufferization::ToTensorOp>(op)) {
@@ -807,6 +892,35 @@ void ConvertTileTensorToVectorPass::storeTile(OpBuilder &b, Location loc,
 void ConvertTileTensorToVectorPass::rewriteOp(OpBuilder &b, Operation *op) {
   Location loc = op->getLoc();
   b.setInsertionPoint(op);
+
+  if (auto it = absorbed.find(op); it != absorbed.end()) {
+    if (llvm::all_of(it->second, [&](tensor::InsertSliceOp insert) {
+          return isConverted(insert.getResult());
+        }))
+      toErase.push_back(op);
+    return;
+  }
+  if (auto insert = dyn_cast<tensor::InsertSliceOp>(op)) {
+    std::optional<MaskedLoad> ml = matchMaskedLoad(insert);
+    if (!ml || !isConverted(insert.getResult()))
+      return;
+    Value view = stripCasts(ml->subview.getSource());
+    VectorType vecTy = vectorType(insert.getType());
+    SmallVector<Value> sizes;
+    for (OpFoldResult size : ml->subview.getMixedSizes())
+      sizes.push_back(getValueOrCreateConstantIndexOp(b, loc, size));
+    Value mask = vector::CreateMaskOp::create(
+        b, loc, VectorType::get(vecTy.getShape(), b.getI1Type()), sizes);
+    Value c0 = arith::ConstantIndexOp::create(b, loc, 0);
+    SmallVector<Value> indices(vecTy.getRank(), c0);
+    SmallVector<bool> inBounds(vecTy.getRank(), true);
+    auto read = vector::TransferReadOp::create(
+        b, loc, vecTy, view, indices, ml->fill.getInputs()[0], inBounds);
+    read.getMaskMutable().assign(mask);
+    mapping.map(insert.getResult(), read.getResult());
+    toErase.push_back(op);
+    return;
+  }
 
   if (auto fill = dyn_cast<linalg::FillOp>(op)) {
     if (!fill.hasPureTensorSemantics())

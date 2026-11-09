@@ -5,6 +5,7 @@ add_mlir_library(ConvertTileTensorToVectorPass
     BuddyIMETileOperands
     BuddyTargetInfo
     MLIRArithDialect
+    MLIRArithUtils
     MLIRBufferizationDialect
     MLIRFuncDialect
     MLIRIR
