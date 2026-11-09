@@ -42,6 +42,12 @@
 //   scf.for iter_args                   vector iter_args
 //   scf.if tensor results               vector results and yields
 //   cpu.sched_barrier                   cpu.sched_barrier on vectors
+//   cpu.shuffle on tensors              vector.shuffle
+//
+// A `cpu.shuffle` joins both operands and its result. One that stays in tensors
+// lowers to a `linalg.generic` that reads each result element with
+// `tensor.extract`, so a shuffle is correct whether or not its tiles fit in
+// registers.
 //
 // A `cpu.sched_barrier` operand joins its result. The barrier exists to hold
 // values in registers, so an operand whose component stays in tensors is an
@@ -396,6 +402,67 @@ bool isAbsorbedTranspose(linalg::TransposeOp transpose,
          feedsOnlyTileDotRhs(transpose->getResult(0), shapes);
 }
 
+/// Lowers a `cpu.shuffle` on tensors to a `linalg.generic` that computes each
+/// result element with `tensor.extract`: element (i, j...) reads mask[i] from
+/// a constant, then row mask[i] of v1 or row mask[i] - v1.shape[0] of v2. Both
+/// reads use an in-range index and a select picks one, so a poison index (-1)
+/// reads row 0 of v1. This keeps a shuffle whose tiles stay in memory correct.
+void lowerTensorShuffle(::buddy::cpu::ShuffleOp shuffle) {
+  OpBuilder b(shuffle);
+  Location loc = shuffle.getLoc();
+  auto v1Ty = cast<RankedTensorType>(shuffle.getV1().getType());
+  auto resTy = cast<RankedTensorType>(shuffle.getResult().getType());
+  int64_t n1 = v1Ty.getDimSize(0);
+  unsigned rank = resTy.getRank();
+  ArrayRef<int64_t> mask = shuffle.getMask();
+  auto maskTy = RankedTensorType::get({static_cast<int64_t>(mask.size())},
+                                      b.getIndexType());
+  SmallVector<APInt> maskValues;
+  for (int64_t m : mask)
+    maskValues.push_back(APInt(64, m, /*isSigned=*/true));
+  Value maskCst = arith::ConstantOp::create(
+      b, loc, DenseElementsAttr::get(maskTy, maskValues));
+  Value init =
+      tensor::EmptyOp::create(b, loc, resTy.getShape(), resTy.getElementType());
+  SmallVector<AffineMap> maps{b.getMultiDimIdentityMap(rank)};
+  SmallVector<utils::IteratorType> iters(rank, utils::IteratorType::parallel);
+  auto generic = linalg::GenericOp::create(
+      b, loc, TypeRange{resTy}, ValueRange{}, ValueRange{init}, maps, iters,
+      [&](OpBuilder &nb, Location nloc, ValueRange) {
+        SmallVector<Value> idx;
+        for (unsigned d = 0; d < rank; ++d)
+          idx.push_back(linalg::IndexOp::create(nb, nloc, d));
+        Value m = tensor::ExtractOp::create(nb, nloc, maskCst, idx[0]);
+        Value c0 = arith::ConstantIndexOp::create(nb, nloc, 0);
+        Value cn1 = arith::ConstantIndexOp::create(nb, nloc, n1);
+        Value nonNeg = arith::MaxSIOp::create(nb, nloc, m, c0);
+        Value inV1 = arith::CmpIOp::create(nb, nloc, arith::CmpIPredicate::slt,
+                                           nonNeg, cn1);
+        Value row1 = arith::SelectOp::create(nb, nloc, inV1, nonNeg, c0);
+        Value off = arith::SubIOp::create(nb, nloc, nonNeg, cn1);
+        Value row2 = arith::SelectOp::create(nb, nloc, inV1, c0, off);
+        SmallVector<Value> i1(idx), i2(idx);
+        i1[0] = row1;
+        i2[0] = row2;
+        Value a = tensor::ExtractOp::create(nb, nloc, shuffle.getV1(), i1);
+        Value c = tensor::ExtractOp::create(nb, nloc, shuffle.getV2(), i2);
+        Value r = arith::SelectOp::create(nb, nloc, inV1, a, c);
+        linalg::YieldOp::create(nb, nloc, r);
+      });
+  shuffle.getResult().replaceAllUsesWith(generic.getResult(0));
+  shuffle.erase();
+}
+
+void lowerTensorShuffles(func::FuncOp func) {
+  SmallVector<::buddy::cpu::ShuffleOp> shuffles;
+  func.walk([&](::buddy::cpu::ShuffleOp op) {
+    if (isTensor(op.getResult()))
+      shuffles.push_back(op);
+  });
+  for (::buddy::cpu::ShuffleOp op : shuffles)
+    lowerTensorShuffle(op);
+}
+
 class ConvertTileTensorToVectorPass
     : public PassWrapper<ConvertTileTensorToVectorPass,
                          OperationPass<func::FuncOp>> {
@@ -419,9 +486,9 @@ public:
     return "Rewrite register-sized tensor components into vectors";
   }
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<arith::ArithDialect, memref::MemRefDialect,
-                    vector::VectorDialect, tensor::TensorDialect,
-                    ::buddy::cpu::CpuDialect>();
+    registry.insert<arith::ArithDialect, linalg::LinalgDialect,
+                    memref::MemRefDialect, vector::VectorDialect,
+                    tensor::TensorDialect, ::buddy::cpu::CpuDialect>();
   }
 
   void runOnOperation() override;
@@ -627,6 +694,11 @@ void ConvertTileTensorToVectorPass::analyze(
     } else if (isa<tensor::ExpandShapeOp, tensor::CollapseShapeOp>(op)) {
       uniteAll({op->getOperand(0), op->getResult(0)});
       return;
+    } else if (auto shuffle = dyn_cast<::buddy::cpu::ShuffleOp>(op)) {
+      if (isTensor(shuffle.getResult())) {
+        uniteAll({shuffle.getV1(), shuffle.getV2(), shuffle.getResult()});
+        return;
+      }
     } else if (auto barrier = dyn_cast<::buddy::cpu::SchedBarrierOp>(op)) {
       for (auto [in, out] :
            llvm::zip(barrier.getInputs(), barrier.getResults()))
@@ -868,6 +940,16 @@ void ConvertTileTensorToVectorPass::rewriteOp(OpBuilder &b, Operation *op) {
     toErase.push_back(op);
     return;
   }
+  if (auto shuffle = dyn_cast<::buddy::cpu::ShuffleOp>(op)) {
+    if (!isTensor(shuffle.getResult()) || !isConverted(shuffle.getResult()))
+      return;
+    Value res = vector::ShuffleOp::create(b, loc, lookup(b, shuffle.getV1()),
+                                          lookup(b, shuffle.getV2()),
+                                          shuffle.getMask());
+    mapping.map(shuffle.getResult(), res);
+    toErase.push_back(op);
+    return;
+  }
   if (auto barrier = dyn_cast<::buddy::cpu::SchedBarrierOp>(op)) {
     SmallVector<Value> inputs;
     for (Value v : barrier.getInputs())
@@ -980,6 +1062,7 @@ void ConvertTileTensorToVectorPass::runOnOperation() {
                    remark::RemarkOpts::name("no-vector").category(kCategory))
         << remark::add("function '{0}'", func.getSymName())
         << remark::reason("the target has no vector unit");
+    lowerTensorShuffles(func);
     return;
   }
 
@@ -1029,6 +1112,7 @@ void ConvertTileTensorToVectorPass::runOnOperation() {
     return signalPassFailure();
 
   rewrite(func);
+  lowerTensorShuffles(func);
 }
 
 } // namespace
