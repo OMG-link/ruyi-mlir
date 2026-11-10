@@ -14,22 +14,22 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// --cpar-distribute-loops (tensor level, before bufferization): every scf.for
-// carrying the unit attribute "cpar.parallel" is rewritten into a one
-// iteration per thread scf.forall {cpar.threads} whose threads run the
-// iterations round robin (see ::buddy::cpar::distributeLoop).  The forall
-// makes One-Shot Bufferize give every thread private buffers for the tensors
-// it writes.
+// --cpar-distribute-loops (tensor level, before bufferization): every
+// scf.forall whose iterations are independent work items (1-d, no
+// shared_outs, no mapping; e.g. a Triton tl.dev.parallel loop) is rewritten
+// into a one iteration per thread scf.forall {cpar.threads} whose threads run
+// the iterations round robin (see ::buddy::cpar::distributeForall).  The
+// thread forall makes One-Shot Bufferize give every thread private buffers
+// for the tensors it writes.
 //
 // --cpar-forall-to-parallel (after bufferization): turns these foralls into
 // cpar.parallel regions.
 //
-//  * Only the outermost marked loop of a nest is distributed; marked loops
-//    nested in it stay sequential inside each thread.
-//  * Marked loops with loop-carried values are rejected: their iterations are
-//    not independent.
-//  * With num-threads=1 the markers are dropped and the loops stay as they
-//    are, so no runtime call is generated.
+//  * Only the outermost forall of a nest is distributed; foralls nested in it
+//    become sequential scf.for loops inside each thread.
+//  * Foralls with shared_outs or a mapping, or of rank > 1, are rejected.
+//  * With num-threads=1 the foralls become sequential scf.for loops, so no
+//    runtime call is generated.
 //
 //===----------------------------------------------------------------------===//
 
@@ -38,6 +38,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/SCF/Transforms/Transforms.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
 
@@ -50,9 +51,9 @@ struct CParDistributeLoopsPass
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(CParDistributeLoopsPass)
   StringRef getArgument() const final { return "cpar-distribute-loops"; }
   StringRef getDescription() const final {
-    return "Distribute the iterations of scf.for loops marked with "
-           "'cpar.parallel' over the threads of a one iteration per thread "
-           "scf.forall (run before bufferization)";
+    return "Distribute the iterations of scf.forall loops over the threads "
+           "of a one iteration per thread scf.forall (run before "
+           "bufferization)";
   }
   CParDistributeLoopsPass() = default;
   CParDistributeLoopsPass(const CParDistributeLoopsPass &other)
@@ -76,51 +77,53 @@ struct CParDistributeLoopsPass
       return signalPassFailure();
     }
 
-    // Outermost marked loops; markers of nested ones are dropped.
-    SmallVector<scf::ForOp> roots;
-    getOperation()->walk<WalkOrder::PreOrder>([&](scf::ForOp loop) {
-      if (!loop->hasAttr(::buddy::cpar::kParallelLoopAttrName))
+    // Work-item foralls, outermost first. Thread foralls already created by
+    // an earlier run are left alone.
+    SmallVector<scf::ForallOp> roots, nested;
+    bool failed = false;
+    getOperation()->walk<WalkOrder::PreOrder>([&](scf::ForallOp forall) {
+      if (forall->hasAttr(::buddy::cpar::kThreadForallAttrName))
         return;
-      Operation *parent = loop->getParentOp();
-      bool nested = false;
-      for (; parent; parent = parent->getParentOp()) {
-        if (isa<::buddy::cpar::ParallelOp>(parent) ||
-            parent->hasAttr(::buddy::cpar::kParallelLoopAttrName) ||
-            parent->hasAttr(::buddy::cpar::kThreadForallAttrName)) {
-          nested = true;
-          break;
+      if (forall.getRank() != 1 || !forall.getOutputs().empty() ||
+          forall.getMapping().has_value()) {
+        forall.emitError("cpar-distribute-loops: expected a 1-d scf.forall "
+                         "without shared_outs and mapping");
+        failed = true;
+        return;
+      }
+      for (Operation *parent = forall->getParentOp(); parent;
+           parent = parent->getParentOp())
+        if (isa<scf::ForallOp, ::buddy::cpar::ParallelOp>(parent)) {
+          forall.emitRemark("cpar-distribute-loops: nested parallel loop is "
+                            "executed sequentially by each thread");
+          nested.push_back(forall);
+          return;
         }
-      }
-      if (nested) {
-        loop.emitRemark("cpar-distribute-loops: nested parallel loop is "
-                        "executed sequentially by each thread");
-        loop->removeAttr(::buddy::cpar::kParallelLoopAttrName);
-        return;
-      }
-      roots.push_back(loop);
+      roots.push_back(forall);
     });
+    if (failed)
+      return signalPassFailure();
 
     IRRewriter rewriter(&getContext());
-    bool failed = false;
-    for (scf::ForOp loop : roots) {
-      if (loop.getNumResults() != 0) {
-        loop.emitError("cpar-distribute-loops: a parallel loop must not carry "
-                       "values from one iteration to the next");
-        failed = true;
-        continue;
-      }
-      if (numThreads == 1) {
-        loop->removeAttr(::buddy::cpar::kParallelLoopAttrName);
-        continue;
-      }
-      if (::mlir::failed(
-              ::buddy::cpar::distributeLoop(rewriter, loop, numThreads))) {
-        loop.emitError("cpar-distribute-loops: failed to distribute loop");
-        failed = true;
+    // Innermost first, so that every forall is rewritten before its parent.
+    for (scf::ForallOp forall : llvm::reverse(nested)) {
+      rewriter.setInsertionPoint(forall);
+      if (::mlir::failed(scf::forallToForLoop(rewriter, forall))) {
+        forall.emitError("cpar-distribute-loops: failed to sequentialize");
+        return signalPassFailure();
       }
     }
-    if (failed)
-      signalPassFailure();
+    for (scf::ForallOp forall : roots) {
+      rewriter.setInsertionPoint(forall);
+      LogicalResult result =
+          numThreads == 1 ? scf::forallToForLoop(rewriter, forall)
+                          : LogicalResult(::buddy::cpar::distributeForall(
+                                rewriter, forall, numThreads));
+      if (::mlir::failed(result)) {
+        forall.emitError("cpar-distribute-loops: failed to distribute loop");
+        return signalPassFailure();
+      }
+    }
   }
 };
 

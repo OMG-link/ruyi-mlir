@@ -9,6 +9,8 @@ add_mlir_library(CParPasses
   MLIRIR
   MLIRLLVMDialect
   MLIRPass
+  MLIRArithUtils
   MLIRSCFDialect
+  MLIRSCFTransforms
   MLIRTransformUtils
 )

@@ -1,5 +1,5 @@
 // RUN: buddy-opt %s --cpar-distribute-loops="num-threads=4" --empty-tensor-to-alloc-tensor --one-shot-bufferize="allow-return-allocs-from-loops=true" --cpar-forall-to-parallel | FileCheck %s
-// RUN: buddy-opt %s --empty-tensor-to-alloc-tensor --one-shot-bufferize="allow-return-allocs-from-loops=true" | FileCheck %s --check-prefix=SEQ
+// RUN: buddy-opt %s --cpar-distribute-loops="num-threads=1" --empty-tensor-to-alloc-tensor --one-shot-bufferize="allow-return-allocs-from-loops=true" | FileCheck %s --check-prefix=SEQ
 
 // Reduced from a Triton kernel: the destination tensor %e is defined outside
 // of the parallel loop (CSE hoists it) and written in every iteration.
@@ -7,8 +7,8 @@
 // Sequentially, bufferization may reuse one buffer for all iterations (second
 // RUN line: the allocation stays outside of the loop).  Executed by threads,
 // that buffer would be shared: a data race.  Distributing at tensor level
-// into an scf.forall makes the write out of place inside the parallel region,
-// so every thread allocates its own buffer.
+// into a thread forall makes the write out of place inside the parallel
+// region, so every thread allocates its own buffer.
 
 // SEQ-LABEL: func.func @kernel
 // SEQ: memref.alloc
@@ -27,10 +27,8 @@
 // CHECK-NOT: scf.forall
 #map = affine_map<(d0) -> (d0)>
 func.func @kernel(%out: memref<?xf32>, %n: index) {
-  %c0 = arith.constant 0 : index
-  %c64 = arith.constant 64 : index
   %e = tensor.empty() : tensor<64xf32>
-  scf.for %i = %c0 to %n step %c64 {
+  scf.forall (%i) = (0) to (%n) step (64) {
     %f = arith.index_cast %i : index to i64
     %v = arith.sitofp %f : i64 to f32
     %t = linalg.generic {indexing_maps = [#map], iterator_types = ["parallel"]}
@@ -42,6 +40,6 @@ func.func @kernel(%out: memref<?xf32>, %n: index) {
         : memref<?xf32> to memref<64xf32, strided<[1], offset: ?>>
     bufferization.materialize_in_destination %t in writable %dst
         : (tensor<64xf32>, memref<64xf32, strided<[1], offset: ?>>) -> ()
-  } {cpar.parallel}
+  }
   return
 }

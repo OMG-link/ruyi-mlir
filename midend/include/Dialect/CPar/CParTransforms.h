@@ -30,13 +30,9 @@
 namespace buddy {
 namespace cpar {
 
-/// Discardable unit attribute marking an scf.for whose iterations are
-/// independent and may be executed by several threads.
-constexpr llvm::StringLiteral kParallelLoopAttrName = "cpar.parallel";
-
 /// Discardable unit attribute marking an scf.forall created by
-/// distributeLoop, i.e. one iteration per thread, to be turned into a
-/// cpar.parallel region by forallToParallel.
+/// distributeLoop / distributeForall, i.e. one iteration per thread, to be
+/// turned into a cpar.parallel region by forallToParallel.
 constexpr llvm::StringLiteral kThreadForallAttrName = "cpar.threads";
 
 /// Name of the runtime entry point called by outlined regions.
@@ -62,8 +58,7 @@ mlir::FailureOr<ParallelOp> wrapInParallelRegion(mlir::RewriterBase &rewriter,
 ///   } {cpar.threads}
 ///
 /// i.e. the iterations are distributed round robin over `numThreads` threads.
-/// Discardable attributes of the loop, except kParallelLoopAttrName, are kept
-/// on the new loop.
+/// Discardable attributes of the loop are kept on the new loop.
 ///
 /// The forall is what makes this safe on tensor level IR: One-Shot
 /// Bufferize treats its body as a parallel region, so a tensor defined
@@ -74,6 +69,14 @@ mlir::FailureOr<ParallelOp> wrapInParallelRegion(mlir::RewriterBase &rewriter,
 mlir::FailureOr<mlir::scf::ForallOp>
 distributeLoop(mlir::RewriterBase &rewriter, mlir::scf::ForOp loop,
                int64_t numThreads);
+
+/// Same as distributeLoop for a tensor level `scf.forall (%iv) = (lb) to (ub)
+/// step (step)` whose iterations are the independent iterations to distribute
+/// (1-d, no shared_outs, no mapping): it becomes the one iteration per thread
+/// forall {cpar.threads} around an scf.for over that thread's iterations.
+mlir::FailureOr<mlir::scf::ForallOp>
+distributeForall(mlir::RewriterBase &rewriter, mlir::scf::ForallOp forall,
+                 int64_t numThreads);
 
 /// Rewrites a buffer level `scf.forall (%t) in (N)` carrying
 /// kThreadForallAttrName (1-d, normalized, no shared_outs) into
@@ -86,8 +89,8 @@ mlir::FailureOr<ParallelOp> forallToParallel(mlir::RewriterBase &rewriter,
 
 namespace mlir {
 namespace buddy {
-/// --cpar-distribute-loops: distributes loops marked with "cpar.parallel"
-/// (tensor level, before bufferization).
+/// --cpar-distribute-loops: distributes the iterations of scf.forall loops
+/// over threads (tensor level, before bufferization).
 void registerCParDistributeLoopsPass();
 /// --cpar-forall-to-parallel: turns the foralls created by
 /// --cpar-distribute-loops into cpar.parallel (after bufferization).

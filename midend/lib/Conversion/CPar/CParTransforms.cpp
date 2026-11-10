@@ -17,6 +17,7 @@
 #include "CPar/CParTransforms.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/IRMapping.h"
 
@@ -67,6 +68,35 @@ static Value castIndexToLoopType(OpBuilder &b, Location loc, Value value,
   return arith::IndexCastOp::create(b, loc, type, value);
 }
 
+// Creates, at the insertion point,
+//
+//   scf.forall (%t) in (N) {
+//     scf.for %iv = lb + t * step to ub step step * N { <empty> }
+//   } {cpar.threads}
+//
+// and returns the forall and the (empty) scf.for. The bounds share one type.
+static std::pair<scf::ForallOp, scf::ForOp>
+createThreadForall(RewriterBase &rewriter, Location loc, Value lowerBound,
+                   Value upperBound, Value step, int64_t numThreads) {
+  Type type = lowerBound.getType();
+  scf::ForOp distributed;
+  auto forall = scf::ForallOp::create(
+      rewriter, loc, ArrayRef<OpFoldResult>{rewriter.getIndexAttr(numThreads)},
+      /*outputs=*/ValueRange{}, /*mapping=*/std::nullopt,
+      [&](OpBuilder &b, Location loc, ValueRange ivs) {
+        Value tid = castIndexToLoopType(b, loc, ivs[0], type);
+        Value nt = castIndexToLoopType(
+            b, loc, arith::ConstantIndexOp::create(b, loc, numThreads), type);
+        Value offset = arith::MulIOp::create(b, loc, tid, step);
+        Value lb = arith::AddIOp::create(b, loc, lowerBound, offset);
+        Value newStep = arith::MulIOp::create(b, loc, step, nt);
+        distributed = scf::ForOp::create(b, loc, lb, upperBound, newStep);
+        scf::InParallelOp::create(b, loc);
+      });
+  forall->setAttr(kThreadForallAttrName, rewriter.getUnitAttr());
+  return {forall, distributed};
+}
+
 FailureOr<scf::ForallOp> distributeLoop(RewriterBase &rewriter, scf::ForOp loop,
                                         int64_t numThreads) {
   if (numThreads < 1)
@@ -77,29 +107,13 @@ FailureOr<scf::ForallOp> distributeLoop(RewriterBase &rewriter, scf::ForOp loop,
 
   OpBuilder::InsertionGuard guard(rewriter);
   rewriter.setInsertionPoint(loop);
-  Location loc = loop.getLoc();
-  Type type = loop.getInductionVar().getType();
-  scf::ForOp distributed;
-  auto forall = scf::ForallOp::create(
-      rewriter, loc, ArrayRef<OpFoldResult>{rewriter.getIndexAttr(numThreads)},
-      /*outputs=*/ValueRange{}, /*mapping=*/std::nullopt,
-      [&](OpBuilder &b, Location loc, ValueRange ivs) {
-        Value tid = castIndexToLoopType(b, loc, ivs[0], type);
-        Value nt = castIndexToLoopType(
-            b, loc, arith::ConstantIndexOp::create(b, loc, numThreads), type);
-        Value offset = arith::MulIOp::create(b, loc, tid, loop.getStep());
-        Value lb = arith::AddIOp::create(b, loc, loop.getLowerBound(), offset);
-        Value step = arith::MulIOp::create(b, loc, loop.getStep(), nt);
-        distributed =
-            scf::ForOp::create(b, loc, lb, loop.getUpperBound(), step);
-        scf::InParallelOp::create(b, loc);
-      });
-  forall->setAttr(kThreadForallAttrName, rewriter.getUnitAttr());
+  auto [forall, distributed] =
+      createThreadForall(rewriter, loop.getLoc(), loop.getLowerBound(),
+                         loop.getUpperBound(), loop.getStep(), numThreads);
 
-  // Keep the loop's other attributes (e.g. tt.num_stages) on the new loop.
+  // Keep the loop's attributes (e.g. tt.num_stages) on the new loop.
   for (NamedAttribute attr : loop->getDiscardableAttrs())
-    if (attr.getName() != kParallelLoopAttrName)
-      distributed->setAttr(attr.getName(), attr.getValue());
+    distributed->setAttr(attr.getName(), attr.getValue());
 
   // Replace the empty body (and its implicit scf.yield) by the original one.
   Block *newBody = distributed.getBody();
@@ -108,6 +122,45 @@ FailureOr<scf::ForallOp> distributeLoop(RewriterBase &rewriter, scf::ForOp loop,
                        {distributed.getInductionVar()});
   rewriter.eraseOp(loop);
   return forall;
+}
+
+FailureOr<scf::ForallOp> distributeForall(RewriterBase &rewriter,
+                                          scf::ForallOp forall,
+                                          int64_t numThreads) {
+  if (numThreads < 1)
+    return rewriter.notifyMatchFailure(forall, "num_threads must be >= 1");
+  if (forall.getRank() != 1 || !forall.getOutputs().empty() ||
+      forall.getNumResults() != 0 || forall.getMapping().has_value())
+    return rewriter.notifyMatchFailure(
+        forall, "expected a 1-d scf.forall without shared_outs and mapping");
+  if (!forall.getTerminator().getYieldingOps().empty())
+    return rewriter.notifyMatchFailure(
+        forall, "expected an empty scf.forall.in_parallel terminator");
+
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPoint(forall);
+  Location loc = forall.getLoc();
+  Value lb = getValueOrCreateConstantIndexOp(rewriter, loc,
+                                             forall.getMixedLowerBound()[0]);
+  Value ub = getValueOrCreateConstantIndexOp(rewriter, loc,
+                                             forall.getMixedUpperBound()[0]);
+  Value step =
+      getValueOrCreateConstantIndexOp(rewriter, loc, forall.getMixedStep()[0]);
+  auto [threads, distributed] =
+      createThreadForall(rewriter, loc, lb, ub, step, numThreads);
+
+  for (NamedAttribute attr : forall->getDiscardableAttrs())
+    distributed->setAttr(attr.getName(), attr.getValue());
+
+  Block *newBody = distributed.getBody();
+  rewriter.eraseOp(newBody->getTerminator());
+  Block *body = forall.getBody();
+  rewriter.eraseOp(body->getTerminator());
+  rewriter.setInsertionPointToEnd(body);
+  scf::YieldOp::create(rewriter, loc);
+  rewriter.mergeBlocks(body, newBody, {distributed.getInductionVar()});
+  rewriter.eraseOp(forall);
+  return threads;
 }
 
 FailureOr<ParallelOp> forallToParallel(RewriterBase &rewriter,
