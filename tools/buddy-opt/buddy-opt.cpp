@@ -44,6 +44,8 @@
 #include "BOSCAME/Transform.h"
 #include "Bud/BudDialect.h"
 #include "Bud/BudOps.h"
+#include "CPar/CParDialect.h"
+#include "CPar/CParTransforms.h"
 #include "DAP/DAPDialect.h"
 #include "DAP/DAPOps.h"
 #include "DIP/DIPDialect.h"
@@ -235,6 +237,10 @@ int main(int argc, char **argv) {
   // Register trace conversion pipeline.
   mlir::buddy::registerConvertTraceToLLVMPass();
   mlir::buddy::registerSiLUFusionPass();
+  // Register CPU parallel region passes.
+  mlir::buddy::registerCParDistributeLoopsPass();
+  mlir::buddy::registerCParForallToParallelPass();
+  mlir::buddy::registerCParOutlineToRuntimePass();
   // Register gpu passes
   mlir::buddy::registerConvertMemcpyToGPUPass();
   mlir::buddy::registerConvertStridedMemrefCopyToLinalgPass();
@@ -253,6 +259,7 @@ int main(int argc, char **argv) {
                   buddy::rvv::RVVDialect,
                   buddy::vector_exp::VectorExpDialect,
                   buddy::vir::VIRDialect,
+                  buddy::cpar::CParDialect,
                   buddy::gemmini::GemminiDialect,
                   buddy::boscame::BOSCAMEDialect,
                   buddy::xtame::XTAMEDialect,
