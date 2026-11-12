@@ -51,13 +51,29 @@ mlir::FailureOr<ParallelOp> wrapInParallelRegion(mlir::RewriterBase &rewriter,
                                                  mlir::Operation *last,
                                                  int64_t numThreads);
 
+/// How the iterations of a distributed loop are handed to its threads.
+enum class Schedule {
+  /// One contiguous range per thread, as OpenMP's schedule(static).
+  Static,
+  /// Thread t runs iterations t, t + N, t + 2N, ...
+  RoundRobin,
+};
+
+/// Discardable string attribute of a work-item scf.forall naming its
+/// Schedule: "static" or "round-robin". Absent means static.
+constexpr llvm::StringLiteral kScheduleAttrName = "cpar.schedule";
+
+/// The Schedule `forall` asks for, std::nullopt for an unknown name.
+std::optional<Schedule> getSchedule(mlir::scf::ForallOp forall);
+
 /// Rewrites `loop` (which must not have loop-carried values) into
 ///
 ///   scf.forall (%t) in (N) {
-///     scf.for %iv = lb + t * step to ub step step * N { body }
+///     scf.for %iv = <thread t's iterations> { body }
 ///   } {cpar.threads}
 ///
-/// i.e. the iterations are distributed round robin over `numThreads` threads.
+/// i.e. the iterations are distributed over `numThreads` threads by
+/// `schedule`.
 /// Discardable attributes of the loop are kept on the new loop.
 ///
 /// The forall is what makes this safe on tensor level IR: One-Shot
@@ -68,7 +84,7 @@ mlir::FailureOr<ParallelOp> wrapInParallelRegion(mlir::RewriterBase &rewriter,
 /// then share.)  Run forallToParallel after bufferization.
 mlir::FailureOr<mlir::scf::ForallOp>
 distributeLoop(mlir::RewriterBase &rewriter, mlir::scf::ForOp loop,
-               int64_t numThreads);
+               int64_t numThreads, Schedule schedule = Schedule::Static);
 
 /// Same as distributeLoop for a tensor level `scf.forall (%iv) = (lb) to (ub)
 /// step (step)` whose iterations are the independent iterations to distribute
@@ -76,7 +92,7 @@ distributeLoop(mlir::RewriterBase &rewriter, mlir::scf::ForOp loop,
 /// forall {cpar.threads} around an scf.for over that thread's iterations.
 mlir::FailureOr<mlir::scf::ForallOp>
 distributeForall(mlir::RewriterBase &rewriter, mlir::scf::ForallOp forall,
-                 int64_t numThreads);
+                 int64_t numThreads, Schedule schedule = Schedule::Static);
 
 /// Rewrites a buffer level `scf.forall (%t) in (N)` carrying
 /// kThreadForallAttrName (1-d, normalized, no shared_outs) into

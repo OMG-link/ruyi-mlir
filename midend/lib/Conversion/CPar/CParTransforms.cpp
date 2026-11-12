@@ -68,16 +68,20 @@ static Value castIndexToLoopType(OpBuilder &b, Location loc, Value value,
   return arith::IndexCastOp::create(b, loc, type, value);
 }
 
-// Creates, at the insertion point,
+// Creates, at the insertion point, a one iteration per thread
 //
-//   scf.forall (%t) in (N) {
-//     scf.for %iv = lb + t * step to ub step step * N { <empty> }
-//   } {cpar.threads}
+//   scf.forall (%t) in (N) { scf.for <thread t's iterations> { <empty> } }
 //
-// and returns the forall and the (empty) scf.for. The bounds share one type.
+// marked {cpar.threads}, and returns the forall and the (empty) scf.for.
+// With Schedule::Static, thread t runs one contiguous range of the n
+// iterations, floor(n / N) of them plus one for the first n % N threads,
+// starting at t * floor(n / N) + min(t, n % N), as OpenMP's
+// schedule(static) does; with Schedule::RoundRobin it runs lb + t * step,
+// lb + (t + N) * step, ... The bounds share one type and step > 0.
 static std::pair<scf::ForallOp, scf::ForOp>
 createThreadForall(RewriterBase &rewriter, Location loc, Value lowerBound,
-                   Value upperBound, Value step, int64_t numThreads) {
+                   Value upperBound, Value step, int64_t numThreads,
+                   Schedule schedule) {
   Type type = lowerBound.getType();
   scf::ForOp distributed;
   auto forall = scf::ForallOp::create(
@@ -87,18 +91,52 @@ createThreadForall(RewriterBase &rewriter, Location loc, Value lowerBound,
         Value tid = castIndexToLoopType(b, loc, ivs[0], type);
         Value nt = castIndexToLoopType(
             b, loc, arith::ConstantIndexOp::create(b, loc, numThreads), type);
-        Value offset = arith::MulIOp::create(b, loc, tid, step);
-        Value lb = arith::AddIOp::create(b, loc, lowerBound, offset);
-        Value newStep = arith::MulIOp::create(b, loc, step, nt);
-        distributed = scf::ForOp::create(b, loc, lb, upperBound, newStep);
+        if (schedule == Schedule::RoundRobin) {
+          Value offset = arith::MulIOp::create(b, loc, tid, step);
+          Value lb = arith::AddIOp::create(b, loc, lowerBound, offset);
+          Value newStep = arith::MulIOp::create(b, loc, step, nt);
+          distributed = scf::ForOp::create(b, loc, lb, upperBound, newStep);
+        } else {
+          Value span = arith::SubIOp::create(b, loc, upperBound, lowerBound);
+          Value n = arith::CeilDivSIOp::create(b, loc, span, step);
+          Value zero = arith::ConstantOp::create(b, loc, b.getZeroAttr(type));
+          n = arith::MaxSIOp::create(b, loc, n, zero); // empty range
+          Value base = arith::DivSIOp::create(b, loc, n, nt);
+          Value rest = arith::RemSIOp::create(b, loc, n, nt);
+          Value one = arith::ConstantOp::create(b, loc, b.getOneAttr(type));
+          Value extra = arith::SelectOp::create(
+              b, loc,
+              arith::CmpIOp::create(b, loc, arith::CmpIPredicate::slt, tid,
+                                    rest),
+              one, zero);
+          Value first = arith::AddIOp::create(
+              b, loc, arith::MulIOp::create(b, loc, tid, base),
+              arith::MinSIOp::create(b, loc, tid, rest));
+          Value last = arith::AddIOp::create(
+              b, loc, first, arith::AddIOp::create(b, loc, base, extra));
+          Value lb = arith::AddIOp::create(
+              b, loc, lowerBound, arith::MulIOp::create(b, loc, first, step));
+          Value ub = arith::AddIOp::create(
+              b, loc, lowerBound, arith::MulIOp::create(b, loc, last, step));
+          distributed = scf::ForOp::create(b, loc, lb, ub, step);
+        }
         scf::InParallelOp::create(b, loc);
       });
   forall->setAttr(kThreadForallAttrName, rewriter.getUnitAttr());
   return {forall, distributed};
 }
 
+std::optional<Schedule> getSchedule(scf::ForallOp forall) {
+  auto attr = forall->getAttrOfType<StringAttr>(kScheduleAttrName);
+  if (!attr || attr.getValue() == "static")
+    return Schedule::Static;
+  if (attr.getValue() == "round-robin")
+    return Schedule::RoundRobin;
+  return std::nullopt;
+}
+
 FailureOr<scf::ForallOp> distributeLoop(RewriterBase &rewriter, scf::ForOp loop,
-                                        int64_t numThreads) {
+                                        int64_t numThreads, Schedule schedule) {
   if (numThreads < 1)
     return rewriter.notifyMatchFailure(loop, "num_threads must be >= 1");
   if (loop.getNumResults() != 0 || !loop.getInitArgs().empty())
@@ -107,9 +145,9 @@ FailureOr<scf::ForallOp> distributeLoop(RewriterBase &rewriter, scf::ForOp loop,
 
   OpBuilder::InsertionGuard guard(rewriter);
   rewriter.setInsertionPoint(loop);
-  auto [forall, distributed] =
-      createThreadForall(rewriter, loop.getLoc(), loop.getLowerBound(),
-                         loop.getUpperBound(), loop.getStep(), numThreads);
+  auto [forall, distributed] = createThreadForall(
+      rewriter, loop.getLoc(), loop.getLowerBound(), loop.getUpperBound(),
+      loop.getStep(), numThreads, schedule);
 
   // Keep the loop's attributes (e.g. tt.num_stages) on the new loop.
   for (NamedAttribute attr : loop->getDiscardableAttrs())
@@ -126,7 +164,8 @@ FailureOr<scf::ForallOp> distributeLoop(RewriterBase &rewriter, scf::ForOp loop,
 
 FailureOr<scf::ForallOp> distributeForall(RewriterBase &rewriter,
                                           scf::ForallOp forall,
-                                          int64_t numThreads) {
+                                          int64_t numThreads,
+                                          Schedule schedule) {
   if (numThreads < 1)
     return rewriter.notifyMatchFailure(forall, "num_threads must be >= 1");
   if (forall.getRank() != 1 || !forall.getOutputs().empty() ||
@@ -147,10 +186,11 @@ FailureOr<scf::ForallOp> distributeForall(RewriterBase &rewriter,
   Value step =
       getValueOrCreateConstantIndexOp(rewriter, loc, forall.getMixedStep()[0]);
   auto [threads, distributed] =
-      createThreadForall(rewriter, loc, lb, ub, step, numThreads);
+      createThreadForall(rewriter, loc, lb, ub, step, numThreads, schedule);
 
   for (NamedAttribute attr : forall->getDiscardableAttrs())
-    distributed->setAttr(attr.getName(), attr.getValue());
+    if (attr.getName() != kScheduleAttrName)
+      distributed->setAttr(attr.getName(), attr.getValue());
 
   Block *newBody = distributed.getBody();
   rewriter.eraseOp(newBody->getTerminator());

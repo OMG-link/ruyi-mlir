@@ -18,7 +18,9 @@
 // scf.forall whose iterations are independent work items (1-d, no
 // shared_outs, no mapping; e.g. a Triton tl.dev.parallel loop) is rewritten
 // into a one iteration per thread scf.forall {cpar.threads} whose threads run
-// the iterations round robin (see ::buddy::cpar::distributeForall).  The
+// the iterations as the forall's "cpar.schedule" attribute says: "static"
+// (the default: one contiguous range per thread, as OpenMP's
+// schedule(static)) or "round-robin" (see ::buddy::cpar::distributeForall). The
 // thread forall makes One-Shot Bufferize give every thread private buffers
 // for the tensors it writes.
 //
@@ -114,11 +116,19 @@ struct CParDistributeLoopsPass
       }
     }
     for (scf::ForallOp forall : roots) {
+      std::optional<::buddy::cpar::Schedule> kind =
+          ::buddy::cpar::getSchedule(forall);
+      if (!kind) {
+        forall.emitError("cpar-distribute-loops: ")
+            << ::buddy::cpar::kScheduleAttrName
+            << " must be \"static\" or \"round-robin\"";
+        return signalPassFailure();
+      }
       rewriter.setInsertionPoint(forall);
       LogicalResult result =
           numThreads == 1 ? scf::forallToForLoop(rewriter, forall)
                           : LogicalResult(::buddy::cpar::distributeForall(
-                                rewriter, forall, numThreads));
+                                rewriter, forall, numThreads, *kind));
       if (::mlir::failed(result)) {
         forall.emitError("cpar-distribute-loops: failed to distribute loop");
         return signalPassFailure();
