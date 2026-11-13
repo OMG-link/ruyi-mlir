@@ -15,15 +15,19 @@
 //===----------------------------------------------------------------------===//
 //
 // `--lower-cpu-sched-barrier` turns `cpu.sched_barrier` on 1-D vectors into an
-// empty `llvm.inline_asm` with side effects that takes every operand in a
-// vector register and returns it there, and clobbers memory:
+// identity the optimizers cannot see through, so each operand is held in its
+// vector register and every use of a result depends on the barrier:
 //
 //   RISC-V  each operand must fill exactly one register group, LMUL = 1/8
 //           .. 8 at the target's VLEN. It is placed in the scalable type of
-//           that group (`llvm.intr.vector.insert`) and bound with `^vr`, the
-//           only vector form LLVM accepts in RISC-V inline asm.
+//           that group (`llvm.intr.vector.insert`) and passed through
+//           `llvm.riscv.sched.barrier`, or `llvm.riscv.sched.barrier.mem`
+//           when the barrier also orders memory. The intrinsic emits nothing
+//           and, unlike inline asm, leaves VL and VTYPE known.
 //   x86     each operand must be exactly one XMM, YMM or (with AVX-512) ZMM
-//           register, bound with `v` with AVX-512 and `x` otherwise.
+//           register and goes through an empty inline asm with side effects,
+//           bound with `v` with AVX-512 and `x` otherwise, clobbering memory
+//           when the barrier orders memory.
 //
 // The target comes from the module's `llvm.target` attribute. An operand
 // that is not a 1-D vector, or that does not fill one register (group), is
@@ -129,7 +133,7 @@ public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LowerCpuSchedBarrierPass)
   StringRef getArgument() const final { return "lower-cpu-sched-barrier"; }
   StringRef getDescription() const final {
-    return "Lower cpu.sched_barrier to an empty inline asm on vector "
+    return "Lower cpu.sched_barrier to an opaque identity on vector "
            "registers";
   }
   void getDependentDialects(DialectRegistry &registry) const override {
@@ -176,39 +180,23 @@ public:
         regTypes.push_back(regCarrierTy);
       }
 
-      // "=reg,...,0,1,...": every operand comes back in the
-      // register it went in.
-      SmallString<64> constraints;
-      for (size_t i = 0; i < operands.size(); ++i) {
-        if (!constraints.empty())
-          constraints += ",";
-        constraints += ("=" + reg).str();
+      SmallVector<Value> held;
+      if (riscv) {
+        // One `llvm.riscv.sched.barrier(.mem)` per operand: an identity the
+        // optimizers cannot see through, with no VL/VTYPE effect.
+        StringAttr intrin =
+            b.getStringAttr(op.getMemoryAttr() ? "llvm.riscv.sched.barrier.mem"
+                                               : "llvm.riscv.sched.barrier");
+        for (Value v : operands)
+          held.push_back(LLVM::CallIntrinsicOp::create(b, loc, v.getType(),
+                                                       intrin, ValueRange{v})
+                             .getResult(0));
+      } else {
+        held = lowerToInlineAsm(b, loc, operands, regTypes, reg,
+                                static_cast<bool>(op.getMemoryAttr()));
       }
-      for (size_t i = 0; i < operands.size(); ++i) {
-        constraints += (Twine(",") + Twine(i)).str();
-      }
-      if (op.getMemoryAttr())
-        constraints += ",~{memory}";
 
-      Type resTy =
-          regTypes.size() == 1
-              ? regTypes.front()
-              : LLVM::LLVMStructType::getLiteral(b.getContext(), regTypes);
-      auto asmOp = LLVM::InlineAsmOp::create(
-          b, loc, resTy, operands, b.getStringAttr(""),
-          b.getStringAttr(constraints), b.getUnitAttr(), UnitAttr(),
-          LLVM::TailCallKindAttr::get(b.getContext(), LLVM::TailCallKind::None),
-          UnitAttr(),
-          LLVM::AsmDialectAttr::get(b.getContext(), LLVM::AsmDialect::AD_ATT),
-          ArrayAttr());
-
-      for (auto [i, res] : llvm::enumerate(op.getResults())) {
-        Value v =
-            regTypes.size() == 1
-                ? asmOp.getRes()
-                : LLVM::ExtractValueOp::create(b, loc, asmOp.getRes(),
-                                               ArrayRef<int64_t>{(int64_t)i})
-                      .getResult();
+      for (auto [res, v] : llvm::zip_equal(op.getResults(), held)) {
         auto resultTy = cast<VectorType>(res.getType());
         auto resultCarrierTy = getBarrierCarrierType(resultTy, *target);
         if (v.getType() != resultCarrierTy)
@@ -220,6 +208,50 @@ public:
       }
       op.erase();
     }
+  }
+
+private:
+  /// An empty side-effecting inline asm that takes and returns every operand
+  /// in a register of class `reg`, optionally clobbering memory.
+  static SmallVector<Value> lowerToInlineAsm(OpBuilder &b, Location loc,
+                                             ArrayRef<Value> operands,
+                                             ArrayRef<Type> regTypes,
+                                             StringRef reg, bool memory) {
+    // "=reg,...,0,1,...": every operand comes back in the
+    // register it went in.
+    SmallString<64> constraints;
+    for (size_t i = 0; i < operands.size(); ++i) {
+      if (!constraints.empty())
+        constraints += ",";
+      constraints += ("=" + reg).str();
+    }
+    for (size_t i = 0; i < operands.size(); ++i) {
+      constraints += (Twine(",") + Twine(i)).str();
+    }
+    if (memory)
+      constraints += ",~{memory}";
+
+    Type resTy =
+        regTypes.size() == 1
+            ? regTypes.front()
+            : LLVM::LLVMStructType::getLiteral(b.getContext(), regTypes);
+    auto asmOp = LLVM::InlineAsmOp::create(
+        b, loc, resTy, operands, b.getStringAttr(""),
+        b.getStringAttr(constraints), b.getUnitAttr(), UnitAttr(),
+        LLVM::TailCallKindAttr::get(b.getContext(), LLVM::TailCallKind::None),
+        UnitAttr(),
+        LLVM::AsmDialectAttr::get(b.getContext(), LLVM::AsmDialect::AD_ATT),
+        ArrayAttr());
+
+    SmallVector<Value> results;
+    for (size_t i = 0; i < regTypes.size(); ++i)
+      results.push_back(
+          regTypes.size() == 1
+              ? asmOp.getRes()
+              : LLVM::ExtractValueOp::create(b, loc, asmOp.getRes(),
+                                             ArrayRef<int64_t>{(int64_t)i})
+                    .getResult());
+    return results;
   }
 };
 

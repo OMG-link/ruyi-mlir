@@ -3,7 +3,7 @@
 // Integer-only Zve32x carries f32 data through an equally sized i32 vector.
 // CHECK: vector.bitcast {{.*}} : vector<8xf32> to vector<8xi32>
 // CHECK: llvm.intr.vector.insert {{.*}} : vector<8xi32> into vector<[2]xi32>
-// CHECK: llvm.inline_asm has_side_effects asm_dialect = att "", "=^vr,0" {{.*}} : (vector<[2]xi32>) -> vector<[2]xi32>
+// CHECK: llvm.call_intrinsic "llvm.riscv.sched.barrier"({{.*}}) : (vector<[2]xi32>) -> vector<[2]xi32>
 // CHECK: llvm.intr.vector.extract {{.*}} : vector<8xi32> from vector<[2]xi32>
 // CHECK: vector.bitcast {{.*}} : vector<8xi32> to vector<8xf32>
 func.func @rv_float_bits(%a: vector<8xf32>) -> vector<8xf32> {
